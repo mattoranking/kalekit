@@ -5,13 +5,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import get_current_user
+from kalekit.auth.permissions import get_scopes_for_roles
 from kalekit.auth.repository import (
     create_user,
     find_user_by_email,
     revoke_user_refresh_tokens,
     store_refresh_token,
 )
-from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.auth.schemas import (
     LoginRequest,
     RefreshRequest,
@@ -19,7 +19,7 @@ from kalekit.auth.schemas import (
     TokenResponse,
     UserResponse,
 )
-from kalekit.auth.permissions import get_scopes_for_roles
+from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.auth.service import (
     create_access_token,
     create_refresh_token,
@@ -28,7 +28,6 @@ from kalekit.auth.service import (
 )
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
-
 
 router = APIRouter(
     prefix="/auth",
@@ -74,7 +73,7 @@ async def login(
         raise HTTPException(status_code=403, detail="Account deactivated")
 
     roles = [ur.role.name for ur in user.roles]
-    scopes = await get_scopes_for_roles(roles)
+    scopes = await get_scopes_for_roles(session, roles)
     access_token = create_access_token(str(user.id), list(scopes))
     refresh_token, expires_at = create_refresh_token(str(user.id))
 
@@ -97,7 +96,9 @@ async def refresh(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
-    from jose import JWTError, jwt as jose_jwt
+    from jose import JWTError
+    from jose import jwt as jose_jwt
+
     from kalekit.config import settings
 
     try:
@@ -120,7 +121,7 @@ async def refresh(
     await revoke_user_refresh_tokens(session, user.id)
 
     roles = [ur.role.name for ur in user.roles]
-    scopes = await get_scopes_for_roles(roles)
+    scopes = await get_scopes_for_roles(session, roles)
     new_access = create_access_token(str(user.id), list(scopes))
     new_refresh, expires_at = create_refresh_token(str(user.id))
 

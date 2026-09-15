@@ -9,8 +9,9 @@ with a short TTL to prevent CSRF and replay attacks.
 """
 
 import secrets
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.permissions import get_redis, get_scopes_for_roles
@@ -18,9 +19,6 @@ from kalekit.auth.service import create_access_token, create_refresh_token
 from kalekit.oauth.client import OAUTH_PROVIDERS
 from kalekit.oauth.repository import find_or_create_oauth_user
 from kalekit.postgres import get_db_session
-
-from typing import Annotated
-from fastapi import Depends
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
@@ -97,11 +95,15 @@ async def oauth_callback(
     try:
         token_response = await client.exchange_code(code, code_verifier)
     except Exception:
-        raise HTTPException(status_code=502, detail="Failed to exchange code with provider")
+        raise HTTPException(
+            status_code=502, detail="Failed to exchange code with provider"
+        )
 
     provider_access_token = token_response.get("access_token")
     if not provider_access_token:
-        raise HTTPException(status_code=502, detail="Provider did not return an access token")
+        raise HTTPException(
+            status_code=502, detail="Provider did not return an access token"
+        )
 
     provider_refresh_token = token_response.get("refresh_token")
 
@@ -109,7 +111,9 @@ async def oauth_callback(
     try:
         user_info = await client.get_user_info(provider_access_token)
     except Exception:
-        raise HTTPException(status_code=502, detail="Failed to fetch user info from provider")
+        raise HTTPException(
+            status_code=502, detail="Failed to fetch user info from provider"
+        )
 
     # Normalize provider-specific fields
     account_id, account_email = _extract_user_info(provider, user_info)
@@ -126,7 +130,7 @@ async def oauth_callback(
 
     # --- Issue our JWT pair ---
     roles = [ur.role.name for ur in user.roles]
-    scopes = await get_scopes_for_roles(roles)
+    scopes = await get_scopes_for_roles(session, roles)
     access_token = create_access_token(str(user.id), list(scopes))
     refresh_token, _ = create_refresh_token(str(user.id))
 

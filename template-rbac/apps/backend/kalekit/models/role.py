@@ -36,8 +36,12 @@ class Permission(RecordModel):
 class UserRole(RecordModel):
     __tablename__ = "user_roles"
 
-    user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"), primary_key=True)
-    role_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("roles.id"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("users.id"), primary_key=True
+    )
+    role_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("roles.id"), primary_key=True
+    )
 
     user: Mapped["User"] = relationship(back_populates="roles")
     role: Mapped["Role"] = relationship(back_populates="users", lazy="selectin")
@@ -46,7 +50,9 @@ class UserRole(RecordModel):
 class RolePermission(RecordModel):
     __tablename__ = "role_permissions"
 
-    role_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("roles.id"), primary_key=True)
+    role_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("roles.id"), primary_key=True
+    )
 
     permission_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("permissions.id"), primary_key=True

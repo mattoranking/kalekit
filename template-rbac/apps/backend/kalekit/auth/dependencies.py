@@ -5,10 +5,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.permissions import get_permissions_for_roles
 from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
-from kalekit.auth.permissions import get_permissions_for_roles
 
 bearer_scheme = HTTPBearer()
 
@@ -40,9 +40,10 @@ def require_permission(permission: str):
 
     async def checker(
         user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[AsyncSession, Depends(get_db_session)],
     ) -> User:
         roles = [ur.role.name for ur in user.roles]
-        user_permissions = await get_permissions_for_roles(roles)
+        user_permissions = await get_permissions_for_roles(session, roles)
         if permission not in user_permissions:
             raise HTTPException(
                 status_code=403,

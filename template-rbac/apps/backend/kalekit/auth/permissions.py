@@ -1,6 +1,7 @@
 import json
 
 import redis.asyncio as redis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.config import settings
 
@@ -18,6 +19,7 @@ async def get_redis() -> redis.Redis:
 
 
 async def get_permissions_for_roles(
+    session: AsyncSession,
     roles: list[str],
 ) -> set[str]:
     """Fetch permissions for a list of roles from Redis."""
@@ -29,7 +31,7 @@ async def get_permissions_for_roles(
             permissions.update(json.loads(cached))
         else:
             # Cache miss - load from DB then cache
-            perms: set[str] = await _load_permissions_from_db(role)
+            perms: set[str] = await _load_permissions_from_db(session, role)
             await r.set(
                 f"role:{role}:permissions",
                 json.dumps(list(perms)),
@@ -39,31 +41,31 @@ async def get_permissions_for_roles(
     return permissions
 
 
-async def _load_permissions_from_db(role_name: str) -> set[str]:
-    """Fallback: query DB and populate Redis."""
-    from kalekit.sql import select
+async def _load_permissions_from_db(
+    session: AsyncSession, role_name: str
+) -> set[str]:
+    """Fallback: query DB and populate Redis.
 
+    Uses the caller's own session/transaction rather than opening a
+    separate engine and connection -- a role's permissions granted
+    earlier in the same request (or the same test transaction) must be
+    visible here without needing a commit first.
+    """
     from kalekit.models.role import (
         Permission,
         Role,
         RolePermission,
     )
+    from kalekit.sql import select
 
-    from kalekit.postgres import create_async_engine
-
-    engine = create_async_engine("kalekit")
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    session_factory = async_sessionmaker(bind=engine)
-    async with session_factory() as session:
-        stmt = (
-            select(Permission.name)
-            .join(RolePermission)
-            .join(Role)
-            .where(Role.name == role_name)
-        )
-        result = await session.execute(stmt)
-        return {row[0] for row in result.all()}
+    stmt = (
+        select(Permission.name)
+        .join(RolePermission)
+        .join(Role)
+        .where(Role.name == role_name)
+    )
+    result = await session.execute(stmt)
+    return {row[0] for row in result.all()}
 
 
 async def invalidate_role_cache(role_name: str) -> None:
@@ -76,7 +78,9 @@ async def invalidate_role_cache(role_name: str) -> None:
 # Scope resolution: roles → validated Scope enum values
 # ---------------------------------------------------------------------------
 
-async def get_scopes_for_roles(roles: list[str]) -> set[str]:
+async def get_scopes_for_roles(
+    session: AsyncSession, roles: list[str]
+) -> set[str]:
     """Resolve roles to validated scope strings.
 
     Fetches raw permissions via the Redis-cached RBAC lookup,
@@ -85,7 +89,7 @@ async def get_scopes_for_roles(roles: list[str]) -> set[str]:
     """
     from kalekit.auth.scope import Scope
 
-    raw_permissions = await get_permissions_for_roles(roles)
+    raw_permissions = await get_permissions_for_roles(session, roles)
     scopes: set[str] = set()
     for perm in raw_permissions:
         try:

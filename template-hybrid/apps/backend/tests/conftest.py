@@ -1,7 +1,10 @@
 from collections.abc import AsyncGenerator
+from typing import Callable, Coroutine
 
+import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
+from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -9,7 +12,9 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from kalekit.config import settings
-from kalekit.utils.db.models import Model
+from kalekit.models import Model  # noqa: F401 -- registers all models
+from kalekit.models.organization import Organization, OrganizationMember
+from kalekit.models.user import User
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -75,3 +80,74 @@ async def client(
         follow_redirects=True,
     ) as ac:
         yield ac
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def register(
+    client: AsyncClient,
+) -> Callable[..., Coroutine[None, None, Response]]:
+    """register(email, password="password123", **extra) -> the raw response.
+
+    Left as a raw response (not asserted) so tests can check status codes
+    that aren't 201 too, e.g. a duplicate-email 409.
+    """
+
+    async def _register(
+        email: str, password: str = "password123", **extra: object
+    ) -> Response:
+        return await client.post(
+            "/v1/auth/register",
+            json={"email": email, "password": password, **extra},
+        )
+
+    return _register
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def login(client: AsyncClient) -> Callable[..., Coroutine[None, None, str]]:
+    """login(email, password="password123") -> access token. Asserts success."""
+
+    async def _login(email: str, password: str = "password123") -> str:
+        response = await client.post(
+            "/v1/auth/login", json={"email": email, "password": password}
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["access_token"]
+
+    return _login
+
+
+@pytest.fixture
+def auth_header() -> Callable[[str], dict[str, str]]:
+    """auth_header(token) -> {"Authorization": "Bearer <token>"}"""
+
+    def _auth_header(token: str) -> dict[str, str]:
+        return {"Authorization": f"Bearer {token}"}
+
+    return _auth_header
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def org_id_for(
+    session: AsyncSession,
+) -> Callable[[str], Coroutine[None, None, str]]:
+    """org_id_for(email) -> str(organization_id) of that user's (first) org.
+
+    No endpoint returns a user's own organization id (only its name, via
+    /auth/me) -- tests reach into the same session/transaction the app
+    is using to look it up directly.
+    """
+
+    async def _org_id_for(email: str) -> str:
+        result = await session.execute(
+            select(Organization.id)
+            .join(
+                OrganizationMember,
+                OrganizationMember.organization_id == Organization.id,
+            )
+            .join(User, User.id == OrganizationMember.user_id)
+            .where(User.email == email)
+        )
+        return str(result.scalar_one())
+
+    return _org_id_for

@@ -95,7 +95,9 @@ async def refresh(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
-    from jose import JWTError, jwt as jose_jwt
+    from jose import JWTError
+    from jose import jwt as jose_jwt
+
     from kalekit.config import settings
 
     try:
