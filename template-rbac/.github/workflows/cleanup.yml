@@ -1,0 +1,124 @@
+name: Cleanup Stale Resources
+
+on:
+  schedule:
+    # Run every Sunday at 2am UTC
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+
+jobs:
+  cleanup-previews:
+    name: Remove Stale Preview Environments
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get active feat branches
+        id: branches
+        run: |
+          # List all remote feat/* branches and extract slugs
+          ACTIVE=$(git branch -r | grep 'origin/feat/' | sed 's|.*origin/feat/||' | sed 's|[^a-zA-Z0-9]|-|g' | tr '[:upper:]' '[:lower:]' | tr -d ' ' | sort)
+          echo "ACTIVE<<EOF" >> $GITHUB_OUTPUT
+          echo "$ACTIVE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Active branches:"
+          echo "$ACTIVE"
+
+      - name: Cleanup stale previews and Docker resources
+        uses: appleboy/ssh-action@v1.0.0
+        env:
+          ACTIVE_BRANCHES: ${{ steps.branches.outputs.ACTIVE }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: ACTIVE_BRANCHES
+          script: |
+            set -e
+            PREVIEW_DIR=/home/deploy/opt/kalekit/preview
+
+            echo "========================================="
+            echo "  Stale Preview Cleanup"
+            echo "========================================="
+
+            if [ ! -d "$PREVIEW_DIR" ]; then
+              echo "No preview directory found, skipping"
+            else
+              echo ""
+              echo "=== Active branches ==="
+              echo "$ACTIVE_BRANCHES"
+              echo ""
+
+              echo "=== Checking preview environments ==="
+              CLEANED=0
+              for dir in $PREVIEW_DIR/*/; do
+                [ -d "$dir" ] || continue
+                SLUG=$(basename "$dir")
+
+                if echo "$ACTIVE_BRANCHES" | grep -q "^${SLUG}$"; then
+                  echo "✅ KEEP: $SLUG (branch still exists)"
+                else
+                  echo "🗑️  REMOVE: $SLUG (branch deleted or stale)"
+                  cd "$dir"
+                  docker compose down -v 2>/dev/null || true
+                  cd $PREVIEW_DIR
+                  rm -rf "$SLUG"
+                  CLEANED=$((CLEANED + 1))
+                fi
+              done
+
+              echo ""
+              echo "Removed $CLEANED stale preview(s)"
+            fi
+
+            echo ""
+            echo "========================================="
+            echo "  Docker System Cleanup"
+            echo "========================================="
+
+            # Remove stopped containers
+            echo ""
+            echo "--- Pruning stopped containers ---"
+            docker container prune -f
+
+            # Remove dangling and unused images older than 7 days
+            echo ""
+            echo "--- Pruning unused images (>7 days old) ---"
+            docker image prune -af --filter "until=168h"
+
+            # Remove unused volumes (not attached to any container)
+            echo ""
+            echo "--- Pruning unused volumes ---"
+            docker volume prune -f
+
+            # Remove unused networks (traefik-public is safe — always in use by Traefik)
+            echo ""
+            echo "--- Pruning unused networks ---"
+            docker network prune -f
+
+            echo ""
+            echo "========================================="
+            echo "  Resource Summary"
+            echo "========================================="
+
+            echo ""
+            echo "--- Disk Usage ---"
+            df -h /
+
+            echo ""
+            echo "--- Docker Disk Usage ---"
+            docker system df
+
+            echo ""
+            echo "--- Active Preview Environments ---"
+            ls -d $PREVIEW_DIR/*/ 2>/dev/null | while read dir; do
+              SLUG=$(basename "$dir")
+              COMMIT=$(cat "$dir/.commit" 2>/dev/null || echo "unknown")
+              echo "  - $SLUG (commit: $COMMIT)"
+            done || echo "  None"
+
+            echo ""
+            echo "--- Running Containers ---"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | head -20

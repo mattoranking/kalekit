@@ -1,0 +1,369 @@
+name: Deploy to Test (Preview)
+
+on:
+  push:
+    branches:
+      - "feat/**"
+  delete:
+
+env:
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  # Clean up when a feature branch is deleted
+  cleanup:
+    name: Cleanup Preview Environment
+    if: github.event_name == 'delete' && github.event.ref_type == 'branch' && startsWith(github.event.ref, 'feat/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract branch slug
+        id: slug
+        run: |
+          BRANCH="${{ github.event.ref }}"
+          SLUG=$(echo "$BRANCH" | sed 's|feat/||' | sed 's|[^a-zA-Z0-9]|-|g' | tr '[:upper:]' '[:lower:]')
+          echo "SLUG=$SLUG" >> $GITHUB_OUTPUT
+
+      - name: Remove preview environment
+        uses: appleboy/ssh-action@v1.0.0
+        env:
+          SLUG: ${{ steps.slug.outputs.SLUG }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: SLUG
+          script: |
+            APP_DIR=/home/deploy/opt/kalekit/preview/${SLUG}
+            if [ -d "$APP_DIR" ]; then
+              cd $APP_DIR
+              docker compose down -v
+              cd ..
+              rm -rf ${SLUG}
+
+              echo "Preview environment ${SLUG} cleaned up"
+            else
+              echo "No preview environment found for ${SLUG}"
+            fi
+
+  build-and-push:
+    name: Build & Push Preview Image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      slug: ${{ steps.slug.outputs.SLUG }}
+      short_sha: ${{ steps.sha.outputs.SHORT_SHA }}
+      backend_image: ${{ steps.images.outputs.BACKEND_IMAGE }}
+      image_tag: ${{ steps.tag.outputs.IMAGE_TAG }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract branch slug
+        id: slug
+        run: |
+          BRANCH=${GITHUB_REF#refs/heads/}
+          SLUG=$(echo "$BRANCH" | sed 's|feat/||' | sed 's|[^a-zA-Z0-9]|-|g' | tr '[:upper:]' '[:lower:]')
+          echo "SLUG=$SLUG" >> $GITHUB_OUTPUT
+          echo "Branch slug: $SLUG"
+
+      - name: Extract short commit SHA
+        id: sha
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-6)
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "Short SHA: $SHORT_SHA"
+
+      - name: Build image tag
+        id: tag
+        run: |
+          IMAGE_TAG="preview-${{ steps.slug.outputs.SLUG }}-${{ steps.sha.outputs.SHORT_SHA }}"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Image tag: $IMAGE_TAG"
+
+      - name: Set image names (lowercase)
+        id: images
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "BACKEND_IMAGE=ghcr.io/${REPO}/backend" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/backend
+          push: true
+          tags: |
+            ${{ steps.images.outputs.BACKEND_IMAGE }}:${{ steps.tag.outputs.IMAGE_TAG }}
+            ${{ steps.images.outputs.BACKEND_IMAGE }}:preview-${{ steps.slug.outputs.SLUG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    environment:
+      name: test
+      url: https://${{ needs.build-and-push.outputs.slug }}.test-api.kalekit.one
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        env:
+          SLUG: ${{ needs.build-and-push.outputs.slug }}
+          SHORT_SHA: ${{ needs.build-and-push.outputs.short_sha }}
+          BACKEND_IMG: ${{ needs.build-and-push.outputs.backend_image }}:${{ needs.build-and-push.outputs.image_tag }}
+          CR_PAT: ${{ secrets.CR_PAT }}
+          GH_ACTOR: ${{ secrets.GH_ACTOR }}
+          TEST_DB_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: SLUG,SHORT_SHA,BACKEND_IMG,CR_PAT,GH_ACTOR,TEST_DB_PASSWORD,GEMINI_API_KEY,ACME_EMAIL
+          script: |
+            set -e
+
+            # ---- Ensure shared Traefik is running ----
+            TRAEFIK_DIR=/home/deploy/opt/kalekit/traefik
+            mkdir -p $TRAEFIK_DIR
+            docker network create traefik-public 2>/dev/null || true
+
+            cat > $TRAEFIK_DIR/docker-compose.yml <<'TRAEFIKEOF'
+            services:
+              traefik:
+                image: traefik:v3.6
+                container_name: kalekit_traefik
+                command:
+                  - "--api.dashboard=false"
+                  - "--providers.docker=true"
+                  - "--providers.docker.exposedbydefault=false"
+                  - "--providers.docker.network=traefik-public"
+                  - "--providers.file.directory=/etc/traefik/dynamic"
+                  - "--providers.file.watch=true"
+                  - "--entrypoints.web.address=:80"
+                  - "--entrypoints.websecure.address=:443"
+                  - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+                  - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+                  - "--log.level=WARN"
+                ports:
+                  - "80:80"
+                  - "443:443"
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker.sock:ro
+                  - /etc/letsencrypt:/etc/letsencrypt:ro
+                  - ./dynamic:/etc/traefik/dynamic:ro
+                networks:
+                  - traefik-public
+                restart: unless-stopped
+                security_opt:
+                  - no-new-privileges:true
+
+            networks:
+              traefik-public:
+                external: true
+            TRAEFIKEOF
+
+            # Auto-discover all certbot certificates
+            mkdir -p $TRAEFIK_DIR/dynamic
+            echo "tls:" > $TRAEFIK_DIR/dynamic/tls.yml
+            echo "  certificates:" >> $TRAEFIK_DIR/dynamic/tls.yml
+            for cert_dir in /etc/letsencrypt/live/*/; do
+              domain=$(basename "$cert_dir")
+              [ "$domain" = "README" ] && continue
+              if [ -f "${cert_dir}fullchain.pem" ] && [ -f "${cert_dir}privkey.pem" ]; then
+                echo "    - certFile: /etc/letsencrypt/live/${domain}/fullchain.pem" >> $TRAEFIK_DIR/dynamic/tls.yml
+                echo "      keyFile: /etc/letsencrypt/live/${domain}/privkey.pem" >> $TRAEFIK_DIR/dynamic/tls.yml
+              fi
+            done
+
+            cd $TRAEFIK_DIR && docker compose up -d
+
+            # ---- Deploy preview ----
+            MAX_PREVIEWS=5
+            PREVIEW_DIR=/home/deploy/opt/kalekit/preview
+            mkdir -p $PREVIEW_DIR
+
+            # Enforce max preview limit
+            CURRENT_COUNT=$(ls -d $PREVIEW_DIR/*/ 2>/dev/null | wc -l)
+            CURRENT_SLUG_EXISTS=false
+            if [ -d "$PREVIEW_DIR/${SLUG}" ]; then
+              CURRENT_SLUG_EXISTS=true
+              CURRENT_COUNT=$((CURRENT_COUNT - 1))
+            fi
+
+            echo "Current preview count: $CURRENT_COUNT (max: $MAX_PREVIEWS)"
+
+            if [ "$CURRENT_COUNT" -ge "$MAX_PREVIEWS" ] && [ "$CURRENT_SLUG_EXISTS" = "false" ]; then
+              OLDEST=$(ls -dt $PREVIEW_DIR/*/ | tail -1)
+              OLDEST_SLUG=$(basename "$OLDEST")
+              echo "Removing oldest preview: $OLDEST_SLUG to make room"
+              cd "$OLDEST"
+              docker compose down -v 2>/dev/null || true
+              cd $PREVIEW_DIR
+              rm -rf "$OLDEST_SLUG"
+            fi
+
+            APP_DIR=$PREVIEW_DIR/${SLUG}
+            mkdir -p $APP_DIR && cd $APP_DIR
+
+            # Save commit SHA for traceability
+            echo "${SHORT_SHA}" > .commit
+
+            # Write docker-compose file
+            cat > docker-compose.yml <<'COMPOSE'
+            services:
+              db:
+                image: postgres:15-alpine
+                container_name: kalekit_db_preview_${SLUG}
+                environment:
+                  - POSTGRES_USER=kalekit
+                  - POSTGRES_PASSWORD=${TEST_DB_PASSWORD}
+                  - POSTGRES_DB=kalekit_preview_${SLUG}
+                volumes:
+                  - postgres_data:/var/lib/postgresql/data
+                networks:
+                  - internal
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD-SHELL", "pg_isready -U kalekit"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
+              backend:
+                image: ${BACKEND_IMG}
+                container_name: kalekit_backend_preview_${SLUG}
+                environment:
+                  KALEKIT_ENV: preview
+                  KALEKIT_POSTGRES_USER: kalekit
+                  KALEKIT_POSTGRES_PWD: ${TEST_DB_PASSWORD}
+                  KALEKIT_POSTGRES_HOST: db
+                  KALEKIT_POSTGRES_PORT: 5432
+                  KALEKIT_POSTGRES_DATABASE: kalekit_preview_${SLUG}
+                  KALEKIT_CORS_ORIGINS: https://${SLUG}.test.kalekit.one
+                  GEMINI_API_KEY: ${GEMINI_API_KEY}
+                expose:
+                  - "8000"
+                depends_on:
+                  db:
+                    condition: service_healthy
+                networks:
+                  - internal
+                  - traefik-public
+                labels:
+                  - "traefik.enable=true"
+                  - "traefik.http.routers.${SLUG}-backend.rule=Host(`${SLUG}.test-api.kalekit.one`)"
+                  - "traefik.http.routers.${SLUG}-backend.entrypoints=websecure"
+                  - "traefik.http.routers.${SLUG}-backend.tls=true"
+                  - "traefik.http.services.${SLUG}-backend.loadbalancer.server.port=8000"
+                  - "traefik.http.routers.${SLUG}-backend.middlewares=${SLUG}-headers"
+                  - "traefik.http.middlewares.${SLUG}-headers.headers.stsSeconds=31536000"
+                  - "traefik.http.middlewares.${SLUG}-headers.headers.stsIncludeSubdomains=true"
+                  - "traefik.http.middlewares.${SLUG}-headers.headers.contentTypeNosniff=true"
+                  - "traefik.http.middlewares.${SLUG}-headers.headers.browserXssFilter=true"
+                healthcheck:
+                  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                restart: unless-stopped
+
+            volumes:
+              postgres_data:
+
+            networks:
+              internal:
+                driver: bridge
+              traefik-public:
+                external: true
+            COMPOSE
+
+            # Write .env file
+            cat > .env <<EOF
+            SLUG=${SLUG}
+            TEST_DB_PASSWORD=${TEST_DB_PASSWORD}
+            GEMINI_API_KEY=${GEMINI_API_KEY}
+            BACKEND_IMG=${BACKEND_IMG}
+            EOF
+
+            # Log in to GHCR
+            echo "${CR_PAT}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
+
+            # Pull and deploy
+            docker compose pull
+            docker compose up -d --force-recreate --wait
+
+            # Cleanup unused images
+            docker image prune -f
+
+            docker compose ps
+            echo "Preview deployed:"
+            echo "  API:      https://${SLUG}.test-api.kalekit.one"
+            echo "  Commit:   ${SHORT_SHA}"
+
+      - name: Comment PR with preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const slug = '${{ needs.build-and-push.outputs.slug }}';
+            const sha = '${{ needs.build-and-push.outputs.short_sha }}';
+            const apiUrl = `https://${slug}.test-api.kalekit.one`;
+            const branch = context.ref.replace('refs/heads/', '');
+
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:${branch}`,
+              state: 'open'
+            });
+
+            for (const pr of prs) {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number
+              });
+
+              const existing = comments.find(c => c.body.includes('Preview Deployment'));
+
+              const body = `**Preview Deployment**\n\n` +
+                `| | URL |\n` +
+                `|---|---|\n` +
+                `| **Backend API** | [${apiUrl}](${apiUrl}) |\n` +
+                `| **API Docs** | [${apiUrl}/docs](${apiUrl}/docs) |\n` +
+                `| **Commit** | \`${sha}\` |\n` +
+                `| **Branch** | \`${branch}\` |\n\n` +
+                `_Updated: ${new Date().toISOString()}_`;
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body
+                });
+              }
+            }

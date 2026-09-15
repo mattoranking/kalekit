@@ -1,0 +1,2 @@
+# Generated from the backend OpenAPI spec — run `pnpm --filter @kalekit/api-client generate`
+src/schema.d.ts

@@ -1,0 +1,332 @@
+name: Deploy to Production
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag to deploy (e.g., v1.0.0)"
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/${{ github.repository }}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build & Push Backend Image
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
+      backend_image: ${{ steps.images.outputs.BACKEND_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.version || github.ref }}
+
+      - name: Extract version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION=${{ github.event.inputs.version }}
+          else
+            VERSION=${GITHUB_REF#refs/tags/}
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Deploying version: $VERSION"
+
+      - name: Set image names (lowercase)
+        id: images
+        run: |
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "BACKEND_IMAGE=ghcr.io/${REPO}/backend" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./apps/backend
+          push: true
+          tags: |
+            ${{ steps.images.outputs.BACKEND_IMAGE }}:latest
+            ${{ steps.images.outputs.BACKEND_IMAGE }}:${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-backend:
+    name: Deploy Backend to DigitalOcean
+    runs-on: ubuntu-latest
+    needs: [build-and-push]
+    environment: production
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        env:
+          BACKEND_IMG: ${{ needs.build-and-push.outputs.backend_image }}:${{ needs.build-and-push.outputs.version }}
+          CR_PAT: ${{ secrets.CR_PAT }}
+          GH_ACTOR: ${{ github.actor }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+          API_DOMAIN: ${{ secrets.API_DOMAIN }}
+          DEPLOY_VERSION: ${{ needs.build-and-push.outputs.version }}
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          envs: BACKEND_IMG,CR_PAT,GH_ACTOR,DB_USER,DB_PASSWORD,GEMINI_API_KEY,CORS_ORIGINS,API_DOMAIN,DEPLOY_VERSION
+          script: |
+            set -e
+
+            # ---- Ensure shared Traefik is running ----
+            TRAEFIK_DIR=/home/deploy/opt/kalekit/traefik
+            mkdir -p $TRAEFIK_DIR
+            docker network create traefik-public 2>/dev/null || true
+
+            cat > $TRAEFIK_DIR/docker-compose.yml <<'TRAEFIKEOF'
+            services:
+              traefik:
+                image: traefik:v3.6
+                container_name: kalekit_traefik
+                command:
+                  - "--api.dashboard=false"
+                  - "--providers.docker=true"
+                  - "--providers.docker.exposedbydefault=false"
+                  - "--providers.docker.network=traefik-public"
+                  - "--providers.file.directory=/etc/traefik/dynamic"
+                  - "--providers.file.watch=true"
+                  - "--entrypoints.web.address=:80"
+                  - "--entrypoints.websecure.address=:443"
+                  - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+                  - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+                  - "--log.level=WARN"
+                ports:
+                  - "80:80"
+                  - "443:443"
+                volumes:
+                  - /var/run/docker.sock:/var/run/docker.sock:ro
+                  - /etc/letsencrypt:/etc/letsencrypt:ro
+                  - ./dynamic:/etc/traefik/dynamic:ro
+                networks:
+                  - traefik-public
+                restart: unless-stopped
+                security_opt:
+                  - no-new-privileges:true
+
+            networks:
+              traefik-public:
+                external: true
+            TRAEFIKEOF
+
+            # Auto-discover all certbot certificates
+            mkdir -p $TRAEFIK_DIR/dynamic
+            echo "tls:" > $TRAEFIK_DIR/dynamic/tls.yml
+            echo "  certificates:" >> $TRAEFIK_DIR/dynamic/tls.yml
+            for cert_dir in /etc/letsencrypt/live/*/; do
+              domain=$(basename "$cert_dir")
+              [ "$domain" = "README" ] && continue
+              if [ -f "${cert_dir}fullchain.pem" ] && [ -f "${cert_dir}privkey.pem" ]; then
+                echo "    - certFile: /etc/letsencrypt/live/${domain}/fullchain.pem" >> $TRAEFIK_DIR/dynamic/tls.yml
+                echo "      keyFile: /etc/letsencrypt/live/${domain}/privkey.pem" >> $TRAEFIK_DIR/dynamic/tls.yml
+              fi
+            done
+
+            cd $TRAEFIK_DIR && docker compose up -d
+
+            # ---- Deploy production app ----
+            APP_DIR=/home/deploy/opt/kalekit/production
+            mkdir -p $APP_DIR && cd $APP_DIR
+
+            # Save current version for potential rollback
+            if [ -f .version ]; then
+              cp .version .version.previous
+            fi
+            echo "${DEPLOY_VERSION}" > .version
+
+            # Write docker-compose file
+            cat > docker-compose.yml <<'COMPOSE'
+            services:
+              db:
+                image: postgres:15-alpine
+                container_name: kalekit_db_prod
+                environment:
+                  POSTGRES_USER: ${DB_USER}
+                  POSTGRES_PASSWORD: ${DB_PASSWORD}
+                  POSTGRES_DB: kalekit_prod
+                volumes:
+                  - postgres_data:/var/lib/postgresql/data
+                networks:
+                  - internal
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
+              backend:
+                image: ${BACKEND_IMG}
+                container_name: kalekit_backend_prod
+                environment:
+                  KALEKIT_ENV: production
+                  KALEKIT_POSTGRES_USER: ${DB_USER}
+                  KALEKIT_POSTGRES_PWD: ${DB_PASSWORD}
+                  KALEKIT_POSTGRES_HOST: db
+                  KALEKIT_POSTGRES_PORT: 5432
+                  KALEKIT_POSTGRES_DATABASE: kalekit_prod
+                  KALEKIT_CORS_ORIGINS: ${CORS_ORIGINS}
+                  GEMINI_API_KEY: ${GEMINI_API_KEY}
+                expose:
+                  - "8000"
+                depends_on:
+                  db:
+                    condition: service_healthy
+                networks:
+                  - internal
+                  - traefik-public
+                labels:
+                  - "traefik.enable=true"
+                  - "traefik.http.routers.prod-backend.rule=Host(`${API_DOMAIN}`)"
+                  - "traefik.http.routers.prod-backend.entrypoints=websecure"
+                  - "traefik.http.routers.prod-backend.tls=true"
+                  - "traefik.http.services.prod-backend.loadbalancer.server.port=8000"
+                  - "traefik.http.routers.prod-backend.middlewares=prod-backend-headers,prod-backend-ratelimit"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.stsSeconds=63072000"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.stsIncludeSubdomains=true"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.stsPreload=true"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.frameDeny=true"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.contentTypeNosniff=true"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.browserXssFilter=true"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.referrerPolicy=strict-origin-when-cross-origin"
+                  - "traefik.http.middlewares.prod-backend-headers.headers.permissionsPolicy=camera=(), microphone=(), geolocation=()"
+                  - "traefik.http.middlewares.prod-backend-ratelimit.ratelimit.average=100"
+                  - "traefik.http.middlewares.prod-backend-ratelimit.ratelimit.burst=50"
+                  - "traefik.http.middlewares.prod-backend-ratelimit.ratelimit.period=1s"
+                  - "traefik.http.services.prod-backend.loadbalancer.healthCheck.path=/health"
+                  - "traefik.http.services.prod-backend.loadbalancer.healthCheck.interval=5s"
+                healthcheck:
+                  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 15s
+                restart: unless-stopped
+
+            volumes:
+              postgres_data:
+
+            networks:
+              internal:
+                driver: bridge
+              traefik-public:
+                external: true
+            COMPOSE
+
+            # Write .env file
+            cat > .env <<EOF
+            DB_USER=${DB_USER}
+            DB_PASSWORD=${DB_PASSWORD}
+            GEMINI_API_KEY=${GEMINI_API_KEY}
+            CORS_ORIGINS=${CORS_ORIGINS}
+            API_DOMAIN=${API_DOMAIN}
+            BACKEND_IMG=${BACKEND_IMG}
+            EOF
+
+            # Log in to GHCR
+            echo "${CR_PAT}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
+
+            # Pull and deploy
+            docker compose pull backend
+            docker compose up -d --wait db
+            docker compose up -d --force-recreate backend
+
+            # Cleanup unused images older than 7 days
+            docker image prune -af --filter "until=168h"
+
+            # Show status
+            docker compose ps
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          script: |
+            sleep 10
+            for i in 1 2 3 4 5; do
+              if curl -sf http://127.0.0.1:8000/health; then
+                echo "Production backend is healthy!"
+                exit 0
+              fi
+              echo "Attempt $i/5 failed, retrying in 10s..."
+              sleep 10
+            done
+            echo "Health check failed"
+            exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.0.0
+        env:
+          BACKEND_IMG_BASE: ${{ needs.build-and-push.outputs.backend_image }}
+          CR_PAT: ${{ secrets.CR_PAT }}
+          GH_ACTOR: ${{ github.actor }}
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          envs: BACKEND_IMG_BASE,CR_PAT,GH_ACTOR
+          script: |
+            cd /home/deploy/opt/kalekit/production
+
+            if [ -f .version.previous ]; then
+              PREV=$(cat .version.previous)
+              echo "Rolling back to $PREV..."
+
+              echo "${CR_PAT}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
+
+              # Update compose to use previous version image
+              sed -i "s|${BACKEND_IMG_BASE}:.*|${BACKEND_IMG_BASE}:${PREV}|" docker-compose.yml
+
+              docker compose pull backend
+              docker compose up -d --force-recreate backend
+              echo "Rollback to $PREV complete"
+            else
+              echo "No previous version found for rollback"
+            fi
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-backend]
+    if: success()
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build-and-push.outputs.version }}
+          name: Release ${{ needs.build-and-push.outputs.version }}
+          body: |
+            ## Deployed to Production
+
+            **Version**: ${{ needs.build-and-push.outputs.version }}
+            **Backend**: https://${{ secrets.API_DOMAIN }}
+          generate_release_notes: true
