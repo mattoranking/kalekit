@@ -124,13 +124,19 @@ async def is_token_blocked(jti: str) -> bool:
 
 
 async def block_all_user_tokens(user_id: str) -> None:
-    """Flag a user so the middleware rejects any access token.
+    """Flag a user so get_current_user rejects any access token.
 
     Unlike per-JTI blocking, this covers tokens whose JTI we
-    don't know (e.g., compromised account). The middleware
+    don't know (e.g., compromised account). get_current_user
     checks this flag alongside the per-JTI blocklist.
     TTL matches access token lifetime.
     """
     r = await get_redis()
     ttl = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
     await r.set(f"blocked_user:{user_id}", "1", ex=ttl)
+
+
+async def is_user_blocked(user_id: str) -> bool:
+    """Check if all of this user's tokens were flagged as revoked."""
+    r = await get_redis()
+    return await r.exists(f"blocked_user:{user_id}") > 0
