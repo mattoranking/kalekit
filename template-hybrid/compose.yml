@@ -20,7 +20,7 @@ services:
 
   migrate:
     build:
-      context: ./apps/backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: kalekit_dev_migrate
     restart: "no"
@@ -38,7 +38,7 @@ services:
     networks:
       - app-network
     volumes:
-      - ./apps/backend:/app
+      - ./backend:/app
       - /app/.venv
 
   redis:
@@ -71,7 +71,7 @@ services:
 
   backend:
     build:
-      context: ./apps/backend
+      context: ./backend
       dockerfile: Dockerfile
     container_name: kalekit_dev_backend
     environment:
@@ -101,7 +101,7 @@ services:
     networks:
       - app-network
     volumes:
-      - ./apps/backend:/app
+      - ./backend:/app
       - /app/.venv
     command: sh -c "uv sync --frozen --no-dev && uv run uvicorn kalekit.main:app --host 0.0.0.0 --port 8000 --reload"
 

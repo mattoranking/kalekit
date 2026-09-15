@@ -30,7 +30,7 @@
 		}
 	],
 	"settings": {
-		"python.defaultInterpreterPath": "apps/backend/.venv/bin/python",
+		"python.defaultInterpreterPath": "backend/.venv/bin/python",
 		"files.exclude": {
 			"backend": true,
 			"apps": true,

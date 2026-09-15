@@ -38,11 +38,11 @@ kalekit/
 ## Getting started
 
 ```bash
-cd apps/backend && uv sync && cd ../..   # backend deps
+cd backend && uv sync && cd ../..   # backend deps
 pnpm install                             # JS workspace deps
 
 cp .env.example .env                                 # root — docker compose reads this
-cp apps/backend/.env.template apps/backend/.env      # backend, non-Docker local dev
+cp backend/.env.template backend/.env      # backend, non-Docker local dev
 
 make setup     # /etc/hosts entries + local mkcert certs for every *.kalekit.dev host
 ```

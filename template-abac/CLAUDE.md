@@ -23,7 +23,7 @@ with internal module boundaries. Not microservices — third-party integrations
 distributed, but there is exactly one service we operate.
 
 ```
-apps/backend/   FastAPI service — the one thing we operate
+backend/   FastAPI service — the one thing we operate
 apps/web/       primary web client   (Next.js)   app.kalekit.dev
 apps/site/      marketing site       (Next.js)   kalekit.dev
 apps/admin/     admin / ops panel    (Next.js)   admin.kalekit.dev

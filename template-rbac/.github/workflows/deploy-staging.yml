@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/backend
+        working-directory: backend
     services:
       postgres:
         image: postgres:15-alpine
@@ -84,7 +84,7 @@ jobs:
       - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
-          context: ./apps/backend
+          context: ./backend
           push: true
           tags: ${{ steps.images.outputs.BACKEND_IMAGE }}:staging
           cache-from: type=gha

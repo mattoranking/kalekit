@@ -4,10 +4,10 @@
 **/.expo
 **/dist
 **/out
-apps/backend/.venv
-apps/backend/.pytest_cache
-apps/backend/.ruff_cache
-apps/backend/.mypy_cache
+backend/.venv
+backend/.pytest_cache
+backend/.ruff_cache
+backend/.mypy_cache
 .git
 **/*.md
 **/.env

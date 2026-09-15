@@ -75,7 +75,7 @@ cd "$DEST"
 
 echo "==> Renaming template tokens -> $SLUG / $SLUG_UPPER / $SLUG_TITLE"
 # rename the Python package dir and the vscode workspace file
-mv apps/backend/kalekit "apps/backend/$SLUG"
+mv backend/kalekit "backend/$SLUG"
 mv kalekit.code-workspace "$SLUG.code-workspace"
 
 # case-aware text substitution across every file (template is all text)
@@ -100,7 +100,7 @@ ${SLUG_UPPER}_CORS_ORIGINS=https://app.${SLUG}.dev,https://admin.${SLUG}.dev,htt
 GEMINI_API_KEY=changeme
 EOF
 
-cat > apps/backend/.env <<EOF
+cat > backend/.env <<EOF
 ${SLUG_UPPER}_ENV=development
 ${SLUG_UPPER}_POSTGRES_USER=${SLUG}
 ${SLUG_UPPER}_POSTGRES_PWD=${SLUG}
@@ -118,7 +118,7 @@ echo "==> pnpm install"
 pnpm install
 
 echo "==> uv sync (backend)"
-( cd apps/backend && uv sync )
+( cd backend && uv sync )
 
 echo "==> git init + first commit"
 git init -q

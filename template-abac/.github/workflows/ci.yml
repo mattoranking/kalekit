@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: apps/backend
+        working-directory: backend
 
     services:
       postgres:
@@ -103,7 +103,7 @@ jobs:
         id: changes
         with:
           filters: |
-            backend: ['apps/backend/**']
+            backend: ['backend/**']
             web:     ['apps/web/**', 'packages/**']
             site:    ['apps/site/**', 'packages/**']
             admin:   ['apps/admin/**', 'packages/**']
@@ -113,7 +113,7 @@ jobs:
 
       - name: Build backend image
         if: steps.changes.outputs.backend == 'true'
-        run: docker build -t backend-test ./apps/backend
+        run: docker build -t backend-test ./backend
 
       - name: Build web image
         if: steps.changes.outputs.web == 'true'

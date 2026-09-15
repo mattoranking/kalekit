@@ -12,9 +12,9 @@ and leaves it running.
 
 ```
 <name>/
+├── backend/       FastAPI + uv — auth (see below), OAuth2 (GitHub/Google/X),
+│                  SQLAlchemy 2 async, Alembic, pytest
 ├── apps/
-│   ├── backend/   FastAPI + uv — auth (see below), OAuth2 (GitHub/Google/X),
-│   │              SQLAlchemy 2 async, Alembic, pytest
 │   ├── web/       Next.js 15 (App Router) + Tailwind
 │   ├── site/      Next.js 15  (marketing)
 │   ├── admin/     Next.js 15  (ops panel)
@@ -26,6 +26,11 @@ and leaves it running.
 ├── compose.yml   db, redis, traefik, backend, web, site, admin
 └── Makefile
 ```
+
+`backend/` sits alongside `apps/`, not inside it — it's a separate service, not a
+frontend surface, and this leaves room for future non-Python backend services
+(e.g. a Go or Elixir service) to live as further siblings without implying they
+belong under `apps/` either.
 
 pnpm + turbo workspace, `pnpm.overrides` pinning React, mkcert + Traefik local TLS.
 

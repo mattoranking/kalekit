@@ -1,4 +1,4 @@
-BACKEND_DIR := apps/backend
+BACKEND_DIR := backend
 DEV_HOSTS := kalekit.dev app.kalekit.dev admin.kalekit.dev api.kalekit.dev
 
 .PHONY: help setup dev down \
