@@ -1,0 +1,10 @@
+tls:
+  certificates:
+    - certFile: /certs/kalekit.dev.pem
+      keyFile: /certs/kalekit.dev-key.pem
+    - certFile: /certs/app.kalekit.dev.pem
+      keyFile: /certs/app.kalekit.dev-key.pem
+    - certFile: /certs/admin.kalekit.dev.pem
+      keyFile: /certs/admin.kalekit.dev-key.pem
+    - certFile: /certs/api.kalekit.dev.pem
+      keyFile: /certs/api.kalekit.dev-key.pem

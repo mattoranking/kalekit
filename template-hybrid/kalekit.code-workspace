@@ -1,0 +1,40 @@
+{
+	"folders": [
+		{
+			"path": "backend",
+			"name": "backend"
+		},
+		{
+			"path": "apps/web",
+			"name": "web"
+		},
+		{
+			"path": "apps/site",
+			"name": "site"
+		},
+		{
+			"path": "apps/admin",
+			"name": "admin"
+		},
+		{
+			"path": "apps/mobile",
+			"name": "mobile"
+		},
+		{
+			"path": "packages",
+			"name": "packages"
+		},
+		{
+			"path": ".",
+			"name": "root"
+		}
+	],
+	"settings": {
+		"python.defaultInterpreterPath": "apps/backend/.venv/bin/python",
+		"files.exclude": {
+			"backend": true,
+			"apps": true,
+			"packages": true
+		}
+	}
+}

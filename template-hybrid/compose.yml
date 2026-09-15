@@ -1,0 +1,189 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: kalekit_dev_db
+    environment:
+      POSTGRES_USER: ${KALEKIT_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${KALEKIT_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${KALEKIT_POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${KALEKIT_POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - app-network
+
+  migrate:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+    container_name: kalekit_dev_migrate
+    restart: "no"
+    environment:
+      KALEKIT_ENV: ${KALEKIT_ENV}
+      KALEKIT_POSTGRES_USER: ${KALEKIT_POSTGRES_USER}
+      KALEKIT_POSTGRES_PWD: ${KALEKIT_POSTGRES_PASSWORD}
+      KALEKIT_POSTGRES_HOST: db
+      KALEKIT_POSTGRES_PORT: "5432"
+      KALEKIT_POSTGRES_DATABASE: ${KALEKIT_POSTGRES_DB}
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: kalekit_dev_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+
+  traefik:
+    image: traefik:v3.6
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.file.filename=/etc/traefik/dynamic.yml"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--serversTransport.insecureSkipVerify=true"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"   # Traefik dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/certs:/certs
+      - ./traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./apps/backend
+      dockerfile: Dockerfile
+    container_name: kalekit_dev_backend
+    environment:
+      KALEKIT_ENV: ${KALEKIT_ENV}
+      KALEKIT_POSTGRES_USER: ${KALEKIT_POSTGRES_USER}
+      KALEKIT_POSTGRES_PWD: ${KALEKIT_POSTGRES_PASSWORD}
+      KALEKIT_POSTGRES_HOST: db
+      KALEKIT_POSTGRES_PORT: "5432"
+      KALEKIT_POSTGRES_DATABASE: ${KALEKIT_POSTGRES_DB}
+      KALEKIT_JWT_SECRET_KEY: ${KALEKIT_JWT_SECRET_KEY}
+      KALEKIT_CORS_ORIGINS: ${KALEKIT_CORS_ORIGINS}
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.kalekit.dev`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - app-network
+    volumes:
+      - ./apps/backend:/app
+      - /app/.venv
+    command: sh -c "uv sync --frozen --no-dev && uv run uvicorn kalekit.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  # --- Web surfaces: dev containers with hot reload. Build context is the repo root. ---
+  web:
+    image: node:20-alpine
+    container_name: kalekit_dev_web
+    working_dir: /repo
+    environment:
+      NEXT_PUBLIC_API_URL: https://api.kalekit.dev
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=Host(`app.kalekit.dev`)"
+      - "traefik.http.routers.web.entrypoints=websecure"
+      - "traefik.http.routers.web.tls=true"
+      - "traefik.http.services.web.loadbalancer.server.port=3000"
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    volumes:
+      - .:/repo
+      - /repo/node_modules
+    command: sh -c "corepack enable && corepack prepare pnpm@8.15.0 --activate && pnpm install && pnpm --filter @kalekit/web dev"
+
+  site:
+    image: node:20-alpine
+    container_name: kalekit_dev_site
+    working_dir: /repo
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.site.rule=Host(`kalekit.dev`)"
+      - "traefik.http.routers.site.entrypoints=websecure"
+      - "traefik.http.routers.site.tls=true"
+      - "traefik.http.services.site.loadbalancer.server.port=3001"
+    expose:
+      - "3001"
+    networks:
+      - app-network
+    volumes:
+      - .:/repo
+      - /repo/node_modules
+    command: sh -c "corepack enable && corepack prepare pnpm@8.15.0 --activate && pnpm install && pnpm --filter @kalekit/site dev"
+
+  admin:
+    image: node:20-alpine
+    container_name: kalekit_dev_admin
+    working_dir: /repo
+    environment:
+      NEXT_PUBLIC_API_URL: https://api.kalekit.dev
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.admin.rule=Host(`admin.kalekit.dev`)"
+      - "traefik.http.routers.admin.entrypoints=websecure"
+      - "traefik.http.routers.admin.tls=true"
+      - "traefik.http.services.admin.loadbalancer.server.port=3002"
+    expose:
+      - "3002"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    volumes:
+      - .:/repo
+      - /repo/node_modules
+    command: sh -c "corepack enable && corepack prepare pnpm@8.15.0 --activate && pnpm install && pnpm --filter @kalekit/admin dev"
+
+  db-test:
+    image: postgres:15-alpine
+    container_name: kalekit_test_db
+    environment:
+      POSTGRES_USER: kalekit
+      POSTGRES_PASSWORD: kalekit
+      POSTGRES_DB: kalekit_test_db
+    ports:
+      - "5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data  # RAM-only, fast, disposable
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
