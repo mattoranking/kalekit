@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Kalekit",
+    "slug": "kalekit",
+    "scheme": "kalekit",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "dev.kalekit.local",
+      "supportsTablet": false
+    },
+    "android": {
+      "package": "dev.kalekit.local"
+    },
+    "plugins": ["expo-router", "expo-updates"],
+    "runtimeVersion": {
+      "policy": "fingerprint"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/PROJECT_ID_HERE",
+      "fallbackToCacheTimeout": 0
+    },
+    "extra": {
+      "eas": {
+        "projectId": "PROJECT_ID_HERE"
+      },
+      "apiUrl": "http://localhost:8000"
+    }
+  }
+}

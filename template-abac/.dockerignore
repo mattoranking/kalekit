@@ -1,0 +1,16 @@
+**/node_modules
+**/.next
+**/.turbo
+**/.expo
+**/dist
+**/out
+apps/backend/.venv
+apps/backend/.pytest_cache
+apps/backend/.ruff_cache
+apps/backend/.mypy_cache
+.git
+**/*.md
+**/.env
+**/.env.*
+!**/.env.template
+!**/.env.testing

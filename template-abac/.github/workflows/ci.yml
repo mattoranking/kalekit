@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test-backend:
+    name: Lint & Test Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/backend
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: kalekit
+          POSTGRES_PASSWORD: kalekit
+          POSTGRES_DB: kalekit_test_db
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Cache uv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('**/uv.lock') }}
+          restore-keys: ${{ runner.os }}-uv-
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Lint with Ruff
+        run: uv run ruff check .
+
+      - name: Run tests
+        env:
+          KALEKIT_ENV: testing
+        run: uv run pytest -v
+
+  frontend:
+    name: Lint & Build (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [web, site, admin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm --filter @kalekit/${{ matrix.app }} lint
+
+      - name: Typecheck
+        run: pnpm --filter @kalekit/${{ matrix.app }} typecheck
+
+      - name: Build
+        run: pnpm --filter @kalekit/${{ matrix.app }} build
+
+  docker-build:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+    needs: [test-backend, frontend]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed apps
+        uses: dorny/paths-filter@v4
+        id: changes
+        with:
+          filters: |
+            backend: ['apps/backend/**']
+            web:     ['apps/web/**', 'packages/**']
+            site:    ['apps/site/**', 'packages/**']
+            admin:   ['apps/admin/**', 'packages/**']
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        if: steps.changes.outputs.backend == 'true'
+        run: docker build -t backend-test ./apps/backend
+
+      - name: Build web image
+        if: steps.changes.outputs.web == 'true'
+        run: docker build -t web-test --build-arg APP=web -f apps/web/Dockerfile .
+
+      - name: Build site image
+        if: steps.changes.outputs.site == 'true'
+        run: docker build -t site-test --build-arg APP=site -f apps/site/Dockerfile .
+
+      - name: Build admin image
+        if: steps.changes.outputs.admin == 'true'
+        run: docker build -t admin-test --build-arg APP=admin -f apps/admin/Dockerfile .
