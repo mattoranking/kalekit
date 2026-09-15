@@ -1,9 +1,10 @@
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import find_user_by_email
+from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.models.oauth_account import OAuthAccount
 from kalekit.models.user import User
 
@@ -62,6 +63,20 @@ async def find_or_create_oauth_user(
         )
         session.add(user)
         await session.flush()
+
+        # Same role-assignment rule as password /auth/register -- without
+        # this, a user whose only signup path was OAuth ends up with no
+        # roles at all, and require_permission rejects them everywhere.
+        visitor_role, admin_role = await ensure_default_roles(session)
+        user_count = (await session.execute(select(func.count(User.id)))).scalar_one()
+        assigned_role = admin_role if user_count == 1 else visitor_role
+        await assign_role(session, user, assigned_role)
+
+        # `user` was constructed in-memory, not loaded via a SELECT, so
+        # selectin eager-loading never ran for it -- an unrefreshed
+        # `.roles` access later would try to lazy-load outside an
+        # active greenlet and crash. Refresh it now, once, here.
+        await session.refresh(user, attribute_names=["roles"])
 
     # Link the OAuth account
     oauth_account = OAuthAccount(

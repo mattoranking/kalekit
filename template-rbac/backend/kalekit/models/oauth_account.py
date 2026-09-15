@@ -25,4 +25,6 @@ class OAuthAccount(RecordModel):
     access_token: Mapped[str] = mapped_column(String, nullable=False)
     refresh_token: Mapped[str | None] = mapped_column(String)
 
-    user: Mapped["User"] = relationship(back_populates="oauth_accounts")
+    user: Mapped["User"] = relationship(
+        back_populates="oauth_accounts", lazy="selectin"
+    )
