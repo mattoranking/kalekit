@@ -31,12 +31,15 @@ services:
       KALEKIT_POSTGRES_HOST: db
       KALEKIT_POSTGRES_PORT: "5432"
       KALEKIT_POSTGRES_DATABASE: ${KALEKIT_POSTGRES_DB}
-    command: ["uv", "run", "alembic", "upgrade", "head"]
+    command: sh -c "uv sync --frozen --no-dev && uv run alembic upgrade head"
     depends_on:
       db:
         condition: service_healthy
     networks:
       - app-network
+    volumes:
+      - ./apps/backend:/app
+      - /app/.venv
 
   redis:
     image: redis:7-alpine
@@ -80,6 +83,7 @@ services:
       KALEKIT_POSTGRES_DATABASE: ${KALEKIT_POSTGRES_DB}
       KALEKIT_JWT_SECRET_KEY: ${KALEKIT_JWT_SECRET_KEY}
       KALEKIT_CORS_ORIGINS: ${KALEKIT_CORS_ORIGINS}
+      KALEKIT_REDIS_URL: redis://redis:6379/0
       GEMINI_API_KEY: ${GEMINI_API_KEY}
     labels:
       - "traefik.enable=true"

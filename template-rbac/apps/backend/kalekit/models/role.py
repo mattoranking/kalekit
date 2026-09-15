@@ -40,7 +40,7 @@ class UserRole(RecordModel):
     role_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("roles.id"), primary_key=True)
 
     user: Mapped["User"] = relationship(back_populates="roles")
-    role: Mapped["Role"] = relationship(back_populates="users")
+    role: Mapped["Role"] = relationship(back_populates="users", lazy="selectin")
 
 
 class RolePermission(RecordModel):
