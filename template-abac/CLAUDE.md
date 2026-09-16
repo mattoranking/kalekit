@@ -82,6 +82,18 @@ exactly one wins. Postgres row lock or Redis lock, but not nothing.
 
 **Buy, don't build:** payments, identity verification, video, email/SMS.
 
+**No tenant query without `organization_id`.** The ABAC gate is
+`WHERE organization_id = ...` on every query against a tenant-scoped
+table — there is no separate permission table. Build that filter through
+`tenant_select()` / `tenant_filter()` (`backend/kalekit/utils/db/tenancy.py`)
+instead of writing `Model.organization_id == ...` by hand: both take
+`organization_id` as a required keyword-only argument, so the filter can't
+be dropped by omitting an argument the way a positional one could be, and
+calling either on a model with no `organization_id` column fails loudly
+instead of silently matching every tenant. Every org-scoped endpoint needs
+a cross-tenant denial test alongside it — member of org A calling org B's
+URL gets 404 and no rows — see `two_tenants` in `backend/tests/conftest.py`.
+
 ## Privacy / GDPR
 
 Treat it as a design constraint, not a checkbox. EU region for database and blob

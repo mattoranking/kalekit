@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import Organization, OrganizationMember
 from kalekit.models.user import User
+from kalekit.utils.db.tenancy import tenant_filter
 
 
 async def create_organization(session: AsyncSession, *, name: str) -> Organization:
@@ -19,7 +20,7 @@ async def get_member(
 ) -> OrganizationMember | None:
     result = await session.execute(
         select(OrganizationMember).where(
-            OrganizationMember.organization_id == organization_id,
+            tenant_filter(OrganizationMember, organization_id=organization_id),
             OrganizationMember.user_id == user_id,
         )
     )
@@ -64,6 +65,6 @@ async def list_members(
     result = await session.execute(
         select(User.id, User.email)
         .join(OrganizationMember, OrganizationMember.user_id == User.id)
-        .where(OrganizationMember.organization_id == organization_id)
+        .where(tenant_filter(OrganizationMember, organization_id=organization_id))
     )
     return list(result.all())
