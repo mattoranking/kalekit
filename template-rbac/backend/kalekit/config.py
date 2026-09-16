@@ -2,10 +2,23 @@ import os
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 type PostgresDriver = Literal["psycopg2", "asyncpg"]
+
+# Placeholder values that ship in config defaults / .env.template / the
+# project generator. None of these are safe to sign tokens with -- anyone
+# who reads this source (or the template) knows them too.
+INSECURE_JWT_SECRETS = {
+    "change-me-in-production",
+    "change_me_in_production",
+    "dev-only-not-secret",
+}
+
+# JWT_SECRET_KEY is used as an HMAC key (HS256). 32 bytes is the minimum
+# recommended key size for HMAC-SHA256 -- shorter keys are brute-forceable.
+MIN_JWT_SECRET_KEY_BYTES = 32
 
 
 class Environment(StrEnum):
@@ -174,6 +187,39 @@ class Settings(BaseSettings):
 
     def is_production(self) -> bool:
         return self.is_environment({Environment.production})
+
+    @model_validator(mode="after")
+    def _validate_jwt_secret_key(self) -> "Settings":
+        """Refuse to start with a known-default or too-short JWT secret.
+
+        Development and testing are exempt so the app still runs out of
+        the box from .env.template / .env.testing without any setup --
+        everywhere else (preview, staging, production), a weak secret
+        would let anyone forge tokens, so we fail fast at startup instead
+        of silently signing with it.
+        """
+        if self.is_environment({Environment.development, Environment.testing}):
+            return self
+
+        secret = self.JWT_SECRET_KEY
+        if secret.lower() in INSECURE_JWT_SECRETS:
+            raise ValueError(
+                "KALEKIT_JWT_SECRET_KEY is set to a known placeholder value "
+                f"({secret!r}). Set a unique, random secret (32+ bytes) "
+                f"before starting in a {self.ENV.value} environment -- "
+                "generate one with `uv run python -m kalekit.cli "
+                "generate-secret`."
+            )
+
+        secret_bytes = len(secret.encode("utf-8"))
+        if secret_bytes < MIN_JWT_SECRET_KEY_BYTES:
+            raise ValueError(
+                f"KALEKIT_JWT_SECRET_KEY is too short ({secret_bytes} bytes; "
+                f"minimum {MIN_JWT_SECRET_KEY_BYTES}). Generate one with "
+                "`uv run python -m kalekit.cli generate-secret`."
+            )
+
+        return self
 
 
 settings = Settings()
