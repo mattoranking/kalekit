@@ -33,7 +33,7 @@ class OrganizationListResponse(BaseModel):
 
 class MemberResponse(BaseModel):
     user_id: uuid.UUID
-    email: str
+    email: str | None
     role: MemberRole
 
 

@@ -46,8 +46,10 @@ async def register(
 
     # Every user always belongs to at least one organization — there is
     # no such thing as a signup without a tenant in this style. The
-    # person who creates an organization is always its owner.
-    org_name = body.organization_name or f"{body.email.split('@')[0]}'s workspace"
+    # person who creates an organization is always its owner. The
+    # default name must never be derived from the email address: that
+    # local part becomes visible to anyone later invited to the org.
+    org_name = body.organization_name or "My workspace"
     organization = await create_organization(session, name=org_name)
     # add_member returns (member, created); discarded here on purpose --
     # this is a brand-new organization, so the membership is always

@@ -29,7 +29,7 @@ class RefreshRequest(BaseModel):
 
 class UserResponse(BaseModel):
     id: uuid.UUID
-    email: str
+    email: str | None
     is_active: bool
     created_at: datetime
     organizations: list[OrganizationMembershipResponse] = []
