@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, String
+from sqlalchemy import Boolean, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kalekit.utils.db.models import RecordModel
@@ -15,10 +15,20 @@ if TYPE_CHECKING:
 
 class User(RecordModel):
     __tablename__ = "users"
-
-    email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
+    __table_args__ = (
+        # Partial unique index: enforces uniqueness only among non-NULL
+        # emails, so multiple OAuth users whose provider never returned an
+        # email (e.g. Twitter/X) can each be stored with email=NULL
+        # instead of a fabricated, unverifiable "@oauth.local" address.
+        Index(
+            "ix_users_email_unique",
+            "email",
+            unique=True,
+            postgresql_where=text("email IS NOT NULL"),
+        ),
     )
+
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 

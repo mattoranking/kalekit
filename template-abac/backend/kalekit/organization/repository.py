@@ -61,7 +61,7 @@ async def list_user_organizations(
 
 async def list_members(
     session: AsyncSession, *, organization_id: uuid.UUID
-) -> list[tuple[uuid.UUID, str]]:
+) -> list[tuple[uuid.UUID, str | None]]:
     result = await session.execute(
         select(User.id, User.email)
         .join(OrganizationMember, OrganizationMember.user_id == User.id)

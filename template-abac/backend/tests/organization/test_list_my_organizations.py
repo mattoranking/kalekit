@@ -15,7 +15,7 @@ async def test_get_organizations_lists_only_the_callers_memberships(
     items = response.json()["items"]
     assert len(items) == 1
     assert items[0]["id"] == alice_register.json()["organizations"][0]["id"]
-    assert items[0]["name"] == "alice's workspace"
+    assert items[0]["name"] == "My workspace"
 
 
 @pytest.mark.asyncio(loop_scope="session")
