@@ -51,6 +51,20 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Extra origins (beyond FRONTEND_URL, which is always allowed) the
+    # OAuth callback may redirect back to after login. Comma-separated
+    # full URLs or bare origins, e.g.
+    # "https://app.example.com,https://admin.example.com". Anything not
+    # matching one of these origins is rejected to prevent the callback
+    # being used as an open redirect.
+    OAUTH_REDIRECT_ALLOWLIST: str = ""
+
+    # How long a post-OAuth-login exchange code lives in Redis before it
+    # expires unused. Kept short: it's single-use and only has to survive
+    # the browser redirect from /oauth/{provider}/callback to the
+    # frontend, which then immediately exchanges it server-side.
+    OAUTH_EXCHANGE_CODE_TTL_SECONDS: int = 60
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 

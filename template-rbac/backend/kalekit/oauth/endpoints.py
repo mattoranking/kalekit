@@ -2,26 +2,41 @@
 OAuth2 authorization-code flow endpoints.
 
 GET  /oauth/{provider}/authorize  → redirect URL + state
-GET  /oauth/{provider}/callback   → exchange code → JWT
+GET  /oauth/{provider}/callback   → exchange code, redirect to frontend
+POST /oauth/exchange              → one-time code → JWT pair
 
 State (and PKCE code_verifier for Twitter) are stored in Redis
 with a short TTL to prevent CSRF and replay attacks.
+
+The callback never puts tokens in the redirect URL: it mints a
+short-lived, single-use exchange code, stashes the token pair in Redis
+under it, and redirects the browser to the (allowlisted) frontend with
+only that code in the query string. The frontend then calls
+POST /oauth/exchange server-side (see #13, the BFF route handler) to
+trade the code for the real token pair -- tokens never transit the
+browser's address bar or history.
 """
 
+import json
 import secrets
 from typing import Annotated
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.permissions import get_redis, get_scopes_for_roles
 from kalekit.auth.repository import store_refresh_token
+from kalekit.auth.schemas import TokenResponse
 from kalekit.auth.service import (
     create_access_token,
     generate_refresh_token,
     hash_refresh_token,
 )
+from kalekit.config import settings
 from kalekit.oauth.client import OAUTH_PROVIDERS
 from kalekit.oauth.repository import OAuthAccountLinkingError, find_or_create_oauth_user
 from kalekit.postgres import get_db_session
@@ -31,6 +46,10 @@ router = APIRouter(prefix="/oauth", tags=["oauth"])
 _STATE_TTL = 600  # 10 minutes
 
 
+class OAuthExchangeRequest(BaseModel):
+    code: str
+
+
 def _get_provider(provider: str):
     client = OAUTH_PROVIDERS.get(provider)
     if not client:
@@ -38,23 +57,66 @@ def _get_provider(provider: str):
     return client
 
 
+def _origin(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def _allowed_redirect_origins() -> set[str]:
+    origins = {_origin(settings.FRONTEND_URL)}
+    for raw in settings.OAUTH_REDIRECT_ALLOWLIST.split(","):
+        raw = raw.strip()
+        if raw:
+            origins.add(_origin(raw))
+    return origins
+
+
+def _is_allowed_redirect(url: str) -> bool:
+    """Only allow redirecting the browser to an origin we explicitly
+    trust -- otherwise the callback is a textbook open redirect (an
+    attacker crafts an authorize link with `redirect_to` pointing at
+    their own site and rides the victim's login to it).
+    """
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        return False
+    return _origin(url) in _allowed_redirect_origins()
+
+
 @router.get("/{provider}/authorize")
-async def oauth_authorize(provider: str):
+async def oauth_authorize(
+    provider: str,
+    redirect_to: Annotated[str | None, Query()] = None,
+):
     """Generate an authorization URL and return it to the frontend.
 
     The frontend redirects the user's browser to this URL.
     State is stored in Redis so the callback can validate it.
+
+    `redirect_to` is where the *callback* should send the user's
+    browser after login completes -- validated against the allowlist
+    now (fail fast) rather than only at callback time, and carried
+    through Redis alongside the CSRF state.
     """
     client = _get_provider(provider)
     state = secrets.token_urlsafe(32)
 
+    target = redirect_to or settings.FRONTEND_URL
+    if not _is_allowed_redirect(target):
+        raise HTTPException(status_code=400, detail="Redirect target not allowed")
+
     authorization_url, code_verifier = client.get_authorization_url(state)
 
-    # Store state (and code_verifier for PKCE) in Redis
+    # Store state (and code_verifier for PKCE, and the post-login
+    # redirect target) in Redis
     r = await get_redis()
-    state_data = provider
-    if code_verifier:
-        state_data = f"{provider}:{code_verifier}"
+    state_data = json.dumps(
+        {
+            "provider": provider,
+            "code_verifier": code_verifier,
+            "redirect_to": target,
+        }
+    )
     await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
 
     return {"authorization_url": authorization_url}
@@ -73,29 +135,37 @@ async def oauth_callback(
     2. Exchange the authorization code for an access token
     3. Fetch the user's profile from the provider
     4. Find or create a local User + OAuthAccount link
-    5. Return our own JWT pair
+    5. Issue our own JWT pair, stash it behind a one-time exchange
+       code, and redirect the browser back to the (allowlisted)
+       frontend with only that code in the URL -- never the tokens
+       themselves.
     """
     client = _get_provider(provider)
 
     # --- Validate state ---
     r = await get_redis()
     state_key = f"oauth_state:{state}"
-    state_data = await r.get(state_key)
-    if not state_data:
+    raw_state_data = await r.get(state_key)
+    if not raw_state_data:
         raise HTTPException(status_code=400, detail="Invalid or expired state")
 
     # Delete immediately — state is single-use
     await r.delete(state_key)
 
-    # Parse code_verifier if present (Twitter PKCE)
-    code_verifier: str | None = None
-    if ":" in state_data:
-        stored_provider, code_verifier = state_data.split(":", 1)
-    else:
-        stored_provider = state_data
+    state_data = json.loads(raw_state_data)
+    stored_provider = state_data["provider"]
+    code_verifier: str | None = state_data.get("code_verifier")
+    redirect_to: str = state_data["redirect_to"]
 
     if stored_provider != provider:
         raise HTTPException(status_code=400, detail="State/provider mismatch")
+
+    # Defense in depth: this was already validated in oauth_authorize
+    # before being written to Redis, but Redis is server-controlled
+    # data we trust here regardless -- re-checking is cheap and makes
+    # the invariant explicit at the point it matters (the redirect).
+    if not _is_allowed_redirect(redirect_to):
+        raise HTTPException(status_code=400, detail="Redirect target not allowed")
 
     # --- Exchange code for token ---
     try:
@@ -157,11 +227,47 @@ async def oauth_callback(
         expires_at=expires_at,
     )
 
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-    }
+    # --- Hand off to the frontend without tokens in the URL ---
+    # The token pair is stashed in Redis behind a single-use, short-lived
+    # code; only that code goes in the redirect URL. The frontend's BFF
+    # (see #13) exchanges it server-side via POST /oauth/exchange.
+    exchange_code = secrets.token_urlsafe(32)
+    await r.set(
+        f"oauth_exchange:{exchange_code}",
+        json.dumps(
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": "bearer",
+            }
+        ),
+        ex=settings.OAUTH_EXCHANGE_CODE_TTL_SECONDS,
+    )
+
+    separator = "&" if "?" in redirect_to else "?"
+    return RedirectResponse(
+        url=f"{redirect_to}{separator}{urlencode({'code': exchange_code})}",
+        status_code=302,
+    )
+
+
+@router.post("/exchange", response_model=TokenResponse)
+async def oauth_exchange(body: OAuthExchangeRequest):
+    """Trade a one-time code (minted by /oauth/{provider}/callback) for
+    the actual JWT pair. Meant to be called server-side by the
+    frontend's BFF right after the post-login redirect -- the code is
+    deleted on first use, so a leaked/replayed URL can't be exchanged
+    twice.
+    """
+    r = await get_redis()
+    exchange_key = f"oauth_exchange:{body.code}"
+    raw = await r.get(exchange_key)
+    if not raw:
+        raise HTTPException(status_code=400, detail="Invalid or expired code")
+
+    await r.delete(exchange_key)
+
+    return TokenResponse(**json.loads(raw))
 
 
 def _extract_user_info(provider: str, user_info: dict) -> tuple[str, str | None]:
