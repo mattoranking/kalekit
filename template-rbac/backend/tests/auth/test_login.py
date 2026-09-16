@@ -4,6 +4,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 import kalekit.auth.endpoints as auth_endpoints
 from kalekit.auth.repository import find_user_by_email
+from kalekit.config import settings
+
+LEGACY_BCRYPT_HASH = "$2b$12$fVcEWj4wDMGN/yfRQAywQOHPaZ3rPZ40inFuNlnwkGuym1KhnL1mu"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -29,9 +32,7 @@ async def test_login_upgrades_a_legacy_bcrypt_hash_to_argon2(
     assert user is not None
     # Simulate a pre-migration account: a stored bcrypt hash rather than
     # the Argon2 hash `register` would have produced today.
-    user.password_hash = (
-        "$2b$12$fVcEWj4wDMGN/yfRQAywQOHPaZ3rPZ40inFuNlnwkGuym1KhnL1mu"
-    )
+    user.password_hash = LEGACY_BCRYPT_HASH
     await session.flush()
 
     response = await client.post(
@@ -50,6 +51,42 @@ async def test_login_upgrades_a_legacy_bcrypt_hash_to_argon2(
         json={"email": email, "password": "correct-password"},
     )
     assert second_response.status_code == 200
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_login_rejected_for_unverified_email_does_not_upgrade_hash(
+    client: AsyncClient,
+    register,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login that's ultimately rejected (here: unverified email, with
+    REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN on) must not have side
+    effects -- in particular it must not silently upgrade a legacy
+    bcrypt hash to Argon2 before the verification check runs. The
+    upgrade should only ever happen alongside an actual, successful
+    login.
+    """
+    monkeypatch.setattr(settings, "REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN", True)
+
+    email = "unverified-legacy-hash@example.com"
+    await register(email, "correct-password")
+
+    user = await find_user_by_email(session, email)
+    assert user is not None
+    assert user.email_verified is False
+    user.password_hash = LEGACY_BCRYPT_HASH
+    await session.flush()
+
+    response = await client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "correct-password"},
+    )
+    assert response.status_code == 403
+
+    unchanged_user = await find_user_by_email(session, email)
+    assert unchanged_user is not None
+    assert unchanged_user.password_hash == LEGACY_BCRYPT_HASH
 
 
 @pytest.mark.asyncio(loop_scope="session")

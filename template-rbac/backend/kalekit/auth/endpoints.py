@@ -126,14 +126,16 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
+    if settings.REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN and not user.email_verified:
+        raise HTTPException(status_code=403, detail="Email verification required")
 
     # Transparently move a legacy (pre-pwdlib) bcrypt hash onto Argon2
     # now that we know the plaintext password -- no forced reset needed.
+    # Done only once every other check has passed, so a login that's
+    # ultimately rejected never mutates the stored hash as a side effect.
     if upgraded_hash is not None:
         user.password_hash = upgraded_hash
         await session.flush()
-    if settings.REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN and not user.email_verified:
-        raise HTTPException(status_code=403, detail="Email verification required")
 
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)

@@ -18,6 +18,18 @@ def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
 
 
+# Maps the HMAC-SHA-2 `alg` values this helper knows how to sign for to
+# their hashlib constructor -- keeps the raw-header helper below in sync
+# with whatever settings.JWT_ALGORITHM actually is, instead of a
+# hardcoded hashlib.sha256 that would silently make the signature (and
+# thus the test) wrong if the app's configured algorithm ever changed.
+_HMAC_ALGORITHMS = {
+    "HS256": hashlib.sha256,
+    "HS384": hashlib.sha384,
+    "HS512": hashlib.sha512,
+}
+
+
 def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
     """Hand-assemble a JWT rather than going through jwt.encode(), which
     (reasonably) refuses to emit a non-string `kid` itself. An attacker
@@ -26,6 +38,14 @@ def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
     exercises `_decode_access_token`'s handling of a malformed `kid`
     from the *unverified* header.
     """
+    alg = header.get("alg", settings.JWT_ALGORITHM)
+    assert alg in _HMAC_ALGORITHMS, (
+        f"_make_token_with_raw_header only knows how to sign for "
+        f"{sorted(_HMAC_ALGORITHMS)}, got {alg!r} -- extend _HMAC_ALGORITHMS "
+        f"if settings.JWT_ALGORITHM has moved to a new scheme."
+    )
+    digestmod = _HMAC_ALGORITHMS[alg]
+
     payload = {
         "sub": "user-1",
         "jti": "jti-1",
@@ -39,9 +59,7 @@ def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
         + "."
         + _b64url(json.dumps(payload, separators=(",", ":")).encode())
     )
-    signature = hmac.new(
-        key.encode(), signing_input.encode(), hashlib.sha256
-    ).digest()
+    signature = hmac.new(key.encode(), signing_input.encode(), digestmod).digest()
     return signing_input + "." + _b64url(signature)
 
 
