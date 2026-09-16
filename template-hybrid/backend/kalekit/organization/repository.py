@@ -46,7 +46,7 @@ async def add_member(
     session.add(member)
     try:
         await session.flush()
-    except IntegrityError:
+    except IntegrityError as exc:
         await session.rollback()
         existing = await session.execute(
             select(OrganizationMember).where(
@@ -54,7 +54,13 @@ async def add_member(
                 OrganizationMember.user_id == user_id,
             )
         )
-        member = existing.scalar_one()
+        member = existing.scalar_one_or_none()
+        if member is None:
+            # Not the uniqueness violation we expected -- e.g. a stale
+            # organization_id/user_id hitting a FK constraint. Re-raise
+            # the original error instead of masking it with a confusing
+            # NoResultFound from this re-fetch.
+            raise exc
         return member, False
     return member, True
 
