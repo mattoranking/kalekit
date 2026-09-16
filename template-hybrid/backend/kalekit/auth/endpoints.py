@@ -26,6 +26,7 @@ from kalekit.auth.service import (
 from kalekit.models.organization import MemberRole
 from kalekit.models.user import User
 from kalekit.organization.repository import add_member, create_organization
+from kalekit.organization.schemas import OrganizationMembershipResponse
 from kalekit.postgres import get_db_session
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -59,7 +60,11 @@ async def register(
         email=user.email,
         is_active=user.is_active,
         created_at=user.created_at,
-        organizations=[organization.name],
+        organizations=[
+            OrganizationMembershipResponse(
+                id=organization.id, name=organization.name, role=MemberRole.owner
+            )
+        ],
     )
 
 
@@ -148,5 +153,10 @@ async def me(user: Annotated[User, Depends(get_current_user)]):
         email=user.email,
         is_active=user.is_active,
         created_at=user.created_at,
-        organizations=[m.organization.name for m in user.memberships],
+        organizations=[
+            OrganizationMembershipResponse(
+                id=m.organization.id, name=m.organization.name, role=m.role
+            )
+            for m in user.memberships
+        ],
     )
