@@ -131,28 +131,6 @@ async def test_refresh_token_used_after_logout_returns_401(
     response = await _refresh(client, refresh_token)
     assert response.status_code == 401
 
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_logout_without_refresh_token_leaves_it_valid(
-    client: AsyncClient, auth_header
-) -> None:
-    """Logging out with only the access token (no refresh token in the
-    request) still kills the access token, but can't know which
-    session's refresh token to revoke -- that refresh token stays
-    usable until its own family is rotated, revoked, or expires."""
-    access_token, refresh_token = await _login_pair(
-        client, "logout-no-body@example.com"
-    )
-
-    logout_response = await client.post(
-        "/v1/auth/logout", headers=auth_header(access_token)
-    )
-    assert logout_response.status_code == 204
-
-    response = await _refresh(client, refresh_token)
-    assert response.status_code == 200
-
-
 @pytest.mark.asyncio(loop_scope="session")
 async def test_logout_does_not_revoke_other_sessions(
     client: AsyncClient, auth_header

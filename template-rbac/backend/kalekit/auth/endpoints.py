@@ -222,7 +222,7 @@ async def logout(
     user: Annotated[User, Depends(get_current_user)],
     jti: Annotated[str | None, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    body: LogoutRequest = LogoutRequest(),
+    body: LogoutRequest,
 ):
     # Only the family tied to *this* session's refresh token is
     # revoked -- not every refresh token the user holds. Web, mobile,
@@ -230,11 +230,10 @@ async def logout(
     # revoking all of them here would log the user out everywhere
     # just because one client logged out. Use /auth/logout-all for
     # that.
-    if body.refresh_token:
-        token_hash = hash_refresh_token(body.refresh_token)
-        token_row = await get_refresh_token_by_hash(session, token_hash)
-        if token_row is not None and token_row.user_id == user.id:
-            await revoke_refresh_token_family(session, token_row.family_id)
+    token_hash = hash_refresh_token(body.refresh_token)
+    token_row = await get_refresh_token_by_hash(session, token_hash)
+    if token_row is not None and token_row.user_id == user.id:
+        await revoke_refresh_token_family(session, token_row.family_id)
 
     # Without this, the access token used to call /logout stays valid
     # for the rest of its natural lifetime -- logging out wouldn't
