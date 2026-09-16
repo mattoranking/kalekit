@@ -85,6 +85,43 @@ async def test_reuse_after_grace_window_revokes_the_family(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_reuse_detection_blocks_the_sessions_live_access_token(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reuse detection revokes the refresh-token family, but a session's
+    access token is a separate, self-contained credential that stays
+    valid on its own until it expires -- revoking the family alone
+    doesn't touch it. If a refresh token was stolen, the access token
+    from that same login is exactly as compromised and must stop
+    working immediately too, not linger for up to
+    ACCESS_TOKEN_EXPIRE_MINUTES.
+    """
+    monkeypatch.setattr(settings, "REFRESH_TOKEN_GRACE_PERIOD_SECONDS", 0)
+
+    access_token, refresh_token = await _login_pair(client, "stolen@example.com")
+
+    still_valid = await client.get(
+        "/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert still_valid.status_code == 200
+
+    rotated = await _refresh(client, refresh_token)
+    assert rotated.status_code == 200
+
+    # Replaying the rotated-away token is reuse -- the strongest signal
+    # available that it was stolen.
+    replay = await _refresh(client, refresh_token)
+    assert replay.status_code == 401
+
+    # The access token minted at login, under the same family, must be
+    # dead now too -- not just the refresh token.
+    blocked = await client.get(
+        "/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert blocked.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_reuse_of_token_older_than_direct_predecessor_revokes_family(
     client: AsyncClient,
 ) -> None:

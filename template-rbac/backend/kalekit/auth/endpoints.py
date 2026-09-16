@@ -230,8 +230,14 @@ async def refresh(
 
         # Reuse outside the grace window, or of a token older than the
         # direct predecessor: treat as a stolen/replayed token and kill
-        # every token in the family.
+        # every token in the family. Also block any access token
+        # already minted under this family -- without this, a
+        # detected-stolen session's still-live access token (issued at
+        # the last legitimate login/refresh) would keep working for
+        # the rest of its natural lifetime despite the family being
+        # revoked, undercutting the whole point of reuse detection.
         await revoke_refresh_token_family(session, token_row.family_id)
+        await block_family_tokens(str(token_row.family_id))
         raise HTTPException(status_code=401, detail="Refresh token already used")
 
     if token_row.expires_at < now:
