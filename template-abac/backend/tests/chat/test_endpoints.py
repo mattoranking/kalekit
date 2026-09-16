@@ -1,6 +1,8 @@
 import pytest
 from httpx import AsyncClient
 
+from tests.conftest import TwoTenants
+
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_member_can_post_and_read(
@@ -68,3 +70,24 @@ async def test_membership_resolves_the_absence(
         f"/v1/organizations/{org_a}/chat/", headers=auth_header(token_bob)
     )
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_non_member_cannot_post_message(
+    client: AsyncClient, auth_header, two_tenants: TwoTenants
+) -> None:
+    """POST is org-scoped too -- a non-member can't write into another
+    org's chat, and no message is created as a side effect of trying."""
+    response = await client.post(
+        f"/v1/organizations/{two_tenants.org_a}/chat/",
+        json={"content": "should not land"},
+        headers=auth_header(two_tenants.token_b),
+    )
+    assert response.status_code == 404
+
+    response = await client.get(
+        f"/v1/organizations/{two_tenants.org_a}/chat/",
+        headers=auth_header(two_tenants.token_a),
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 0
