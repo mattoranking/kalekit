@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import get_current_jti, get_current_user
@@ -70,7 +71,22 @@ async def register(
     # Password sign-ups always start unverified -- verification proves
     # the registrant actually controls this mailbox, which is what lets
     # OAuth account-linking trust the email later (see oauth/repository.py).
-    user = await create_user(session, body.email, body.password, email_verified=False)
+    #
+    # The email-existence check above doesn't stop two simultaneous
+    # registrations for the same address from both passing it and both
+    # reaching this insert -- `User.email` is DB-unique, so the loser
+    # hits an IntegrityError. Catch it (rolling back only this savepoint,
+    # not the whole request's transaction) and report the same clean 409
+    # the sequential case gets, instead of letting it bubble up as a 500.
+    try:
+        async with session.begin_nested():
+            user = await create_user(
+                session, body.email, body.password, email_verified=False
+            )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="Email already registered"
+        ) from exc
 
     # Every self-signup gets the default role -- there is no first-user
     # admin rule. Promoting an admin is a deliberate, out-of-band act via
