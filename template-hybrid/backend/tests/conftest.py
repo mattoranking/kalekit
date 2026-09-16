@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass
 from typing import Callable, Coroutine
 
 import pytest
@@ -151,3 +152,42 @@ async def org_id_for(
         return str(result.scalar_one())
 
     return _org_id_for
+
+
+@dataclass
+class TwoTenants:
+    """Two distinct users, each the sole (owner) member of their own
+    organization.
+
+    The cross-tenant test helper: every org-scoped endpoint should get a
+    test that logs in as `token_b` and hits a URL scoped to `org_a`,
+    asserting a 404 and that nothing leaked/changed.
+    """
+
+    token_a: str
+    org_a: str
+    token_b: str
+    org_b: str
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def two_tenants(
+    register: Callable[..., Coroutine[None, None, Response]],
+    login: Callable[..., Coroutine[None, None, str]],
+) -> TwoTenants:
+    """Registers two users in two separate organizations.
+
+    Use this instead of hand-rolling two `register`/`login` calls for any
+    test asserting cross-tenant denial: "member of org A calling org B's
+    URL gets 404 and no rows."
+    """
+    response_a = await register("tenant-a@example.com")
+    response_b = await register("tenant-b@example.com")
+    token_a = await login("tenant-a@example.com")
+    token_b = await login("tenant-b@example.com")
+    return TwoTenants(
+        token_a=token_a,
+        org_a=response_a.json()["organizations"][0]["id"],
+        token_b=token_b,
+        org_b=response_b.json()["organizations"][0]["id"],
+    )

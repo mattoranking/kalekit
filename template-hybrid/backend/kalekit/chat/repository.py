@@ -4,17 +4,19 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.chat.models import ChatMessage
+from kalekit.utils.db.tenancy import tenant_filter, tenant_select
 
 
 def get_readable_statement(organization_id: uuid.UUID) -> Select:
     """Ownership filter: only messages belonging to this organization.
 
-    This is the ABAC gate itself — there's no separate permission
-    lookup anywhere in this module. Mirrors the pattern real
+    This is the ABAC-inside-Hybrid gate itself — there's no separate
+    permission lookup here, just tenant scope. Mirrors the pattern real
     multi-tenant products (e.g. Polar) use: the tenant check lives in
-    the query, not in a decorator.
+    the query, not in a decorator. Built via `tenant_select()` so the
+    filter can't be typo'd or dropped by hand.
     """
-    return select(ChatMessage).where(ChatMessage.organization_id == organization_id)
+    return tenant_select(ChatMessage, organization_id=organization_id)
 
 
 async def list_messages(
@@ -22,7 +24,7 @@ async def list_messages(
 ) -> tuple[list[ChatMessage], int]:
     total_q = await session.execute(
         select(func.count(ChatMessage.id)).where(
-            ChatMessage.organization_id == organization_id
+            tenant_filter(ChatMessage, organization_id=organization_id)
         )
     )
     total = total_q.scalar_one()

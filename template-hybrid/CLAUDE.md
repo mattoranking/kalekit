@@ -107,6 +107,19 @@ role-permission check as the fallback — don't try to force a per-record
 ownership rule into `ROLE_PERMISSIONS`. See
 `backend/kalekit/chat/endpoints.py::delete_message_endpoint`.
 
+**No tenant query without `organization_id`.** Every tenant-scoped table
+is read or written within exactly one organization at a time, and the
+role checks in `auth/roles.py` sit on top of that ownership gate rather
+than replacing it. Build the `organization_id` filter through
+`tenant_select()` / `tenant_filter()` (`backend/kalekit/utils/db/tenancy.py`)
+instead of writing `Model.organization_id == ...` by hand: both take
+`organization_id` as a required keyword-only argument, so the filter can't
+be dropped by omitting an argument the way a positional one could be, and
+calling either on a model with no `organization_id` column fails loudly
+instead of silently matching every tenant. Every org-scoped endpoint needs
+a cross-tenant denial test alongside it — member of org A calling org B's
+URL gets 404 and no rows — see `two_tenants` in `backend/tests/conftest.py`.
+
 ## The admin panel is the product
 
 For the first hundred records, a human does the matching and fixes the edge

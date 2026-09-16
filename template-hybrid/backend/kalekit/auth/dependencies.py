@@ -14,6 +14,7 @@ from kalekit.config import settings
 from kalekit.models.organization import MemberRole, OrganizationMember
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
+from kalekit.utils.db.tenancy import tenant_filter
 
 bearer_scheme = HTTPBearer()
 
@@ -67,7 +68,7 @@ async def _get_membership(
 ) -> OrganizationMember | None:
     result = await session.execute(
         select(OrganizationMember).where(
-            OrganizationMember.organization_id == organization_id,
+            tenant_filter(OrganizationMember, organization_id=organization_id),
             OrganizationMember.user_id == user_id,
         )
     )
