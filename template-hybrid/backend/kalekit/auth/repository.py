@@ -11,8 +11,10 @@ from kalekit.models.user import User
 
 async def find_user_by_email(session: AsyncSession, email: str | None) -> User | None:
     if email is None:
-        # NULL never matches via `=` in SQL, but guard explicitly so a
-        # caller never accidentally looks up "the user with no email".
+        # SQLAlchemy rewrites `User.email == None` to `IS NULL`, which
+        # WOULD match an arbitrary NULL-email user -- guard explicitly
+        # so a caller never accidentally looks up "the user with no
+        # email" and gets back someone else's account.
         return None
     result = await session.execute(select(User).where(User.email == email))
     return result.scalar_one_or_none()
