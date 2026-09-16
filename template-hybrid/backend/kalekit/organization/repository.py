@@ -68,7 +68,7 @@ async def add_member(
 
 async def list_members(
     session: AsyncSession, *, organization_id: uuid.UUID
-) -> list[tuple[uuid.UUID, str, MemberRole]]:
+) -> list[tuple[uuid.UUID, str | None, MemberRole]]:
     result = await session.execute(
         select(User.id, User.email, OrganizationMember.role)
         .join(OrganizationMember, OrganizationMember.user_id == User.id)

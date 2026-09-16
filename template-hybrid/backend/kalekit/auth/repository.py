@@ -9,7 +9,11 @@ from kalekit.models.refresh_token import RefreshToken
 from kalekit.models.user import User
 
 
-async def find_user_by_email(session: AsyncSession, email: str) -> User | None:
+async def find_user_by_email(session: AsyncSession, email: str | None) -> User | None:
+    if email is None:
+        # NULL never matches via `=` in SQL, but guard explicitly so a
+        # caller never accidentally looks up "the user with no email".
+        return None
     result = await session.execute(select(User).where(User.email == email))
     return result.scalar_one_or_none()
 
