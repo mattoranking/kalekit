@@ -13,12 +13,18 @@ from kalekit.postgres import get_db_session
 bearer_scheme = HTTPBearer()
 
 
-def _signing_key_for_kid(kid: str | None) -> str | None:
+def _signing_key_for_kid(kid: Any) -> str | None:
     """Resolve a token's `kid` header to the secret it was (or should
     have been) signed with -- the current key, or one of the previous
     keys kept around for rotation. None means "don't know this key",
-    which the caller must treat as an invalid token."""
-    if kid is None:
+    which the caller must treat as an invalid token.
+
+    `kid` comes from the *unverified* token header, so it's arbitrary
+    attacker-controlled JSON, not necessarily a string -- e.g. a list
+    or dict, which would raise `TypeError: unhashable type` from the
+    dict lookup below if not rejected first.
+    """
+    if not isinstance(kid, str) or not kid:
         return None
     if kid == settings.JWT_KID:
         return settings.JWT_SECRET_KEY

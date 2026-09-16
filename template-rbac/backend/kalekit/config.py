@@ -2,7 +2,7 @@ import os
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import PostgresDsn
+from pydantic import Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 type PostgresDriver = Literal["psycopg2", "asyncpg"]
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # move the old key in here) without invalidating every outstanding
     # token. Drop an entry once nothing signed under it should still be
     # accepted (e.g. past its max access-token lifetime).
-    JWT_PREVIOUS_KEYS: dict[str, str] = {}
+    JWT_PREVIOUS_KEYS: dict[str, str] = Field(default_factory=dict)
     # Required `aud` claim on access tokens -- pinning it (rather than
     # accepting any audience) keeps a token minted for one purpose from
     # being replayed against an API that happens to trust the same

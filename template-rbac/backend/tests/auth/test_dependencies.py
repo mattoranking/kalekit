@@ -1,12 +1,48 @@
+import base64
+import hashlib
+import hmac
+import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import jwt
 import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
-from kalekit.auth.dependencies import _decode_access_token
+from kalekit.auth.dependencies import _decode_access_token, _signing_key_for_kid
 from kalekit.config import settings
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
+    """Hand-assemble a JWT rather than going through jwt.encode(), which
+    (reasonably) refuses to emit a non-string `kid` itself. An attacker
+    isn't bound by PyJWT's encode-side validation though -- they can put
+    whatever JSON they like in the header -- so this is what actually
+    exercises `_decode_access_token`'s handling of a malformed `kid`
+    from the *unverified* header.
+    """
+    payload = {
+        "sub": "user-1",
+        "jti": "jti-1",
+        "scopes": ["read"],
+        "type": "access",
+        "exp": int((datetime.now(timezone.utc) + timedelta(minutes=15)).timestamp()),
+        "aud": settings.JWT_AUDIENCE,
+    }
+    signing_input = (
+        _b64url(json.dumps(header, separators=(",", ":")).encode())
+        + "."
+        + _b64url(json.dumps(payload, separators=(",", ":")).encode())
+    )
+    signature = hmac.new(
+        key.encode(), signing_input.encode(), hashlib.sha256
+    ).digest()
+    return signing_input + "." + _b64url(signature)
 
 
 def _credentials(token: str) -> HTTPAuthorizationCredentials:
@@ -16,7 +52,7 @@ def _credentials(token: str) -> HTTPAuthorizationCredentials:
 def _make_token(
     *,
     key: str = settings.JWT_SECRET_KEY,
-    kid: str | None = settings.JWT_KID,
+    kid: Any = settings.JWT_KID,
     algorithm: str = settings.JWT_ALGORITHM,
     aud: str | None = settings.JWT_AUDIENCE,
     exp_delta: timedelta = timedelta(minutes=15),
@@ -97,6 +133,35 @@ def test_decode_rejects_token_missing_kid_header() -> None:
         _decode_access_token(_credentials(token))
 
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("malformed_kid", [["not", "a", "string"], {"a": 1}, 123, ""])
+def test_decode_rejects_token_with_non_string_kid(malformed_kid: object) -> None:
+    """`kid` comes from the token's *unverified* header, so it's
+    attacker-controlled JSON of any shape -- a list or dict here must
+    be rejected cleanly (401), not raise an unhandled TypeError from
+    treating it as a dict key (which would surface as a 500).
+
+    Built by hand (not via `_make_token`/`jwt.encode`) because PyJWT's
+    own encode() already refuses a non-string `kid` -- an attacker
+    crafting the token bytes directly isn't bound by that.
+    """
+    token = _make_token_with_raw_header(
+        {"alg": settings.JWT_ALGORITHM, "typ": "JWT", "kid": malformed_kid},
+        settings.JWT_SECRET_KEY,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("malformed_kid", [["not", "a", "string"], {"a": 1}, 123, ""])
+def test_signing_key_for_kid_returns_none_for_non_string_kid(
+    malformed_kid: object,
+) -> None:
+    assert _signing_key_for_kid(malformed_kid) is None
 
 
 def test_decode_accepts_token_signed_with_a_previous_key(
