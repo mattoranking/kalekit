@@ -1,8 +1,8 @@
 from typing import Annotated, Any
 
+import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.permissions import is_token_blocked, is_user_blocked
@@ -13,14 +13,43 @@ from kalekit.postgres import get_db_session
 bearer_scheme = HTTPBearer()
 
 
+def _signing_key_for_kid(kid: str | None) -> str | None:
+    """Resolve a token's `kid` header to the secret it was (or should
+    have been) signed with -- the current key, or one of the previous
+    keys kept around for rotation. None means "don't know this key",
+    which the caller must treat as an invalid token."""
+    if kid is None:
+        return None
+    if kid == settings.JWT_KID:
+        return settings.JWT_SECRET_KEY
+    return settings.JWT_PREVIOUS_KEYS.get(kid)
+
+
 def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str, Any]:
+    token = credentials.credentials
+
+    try:
+        kid = jwt.get_unverified_header(token).get("kid")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    key = _signing_key_for_kid(kid)
+    if key is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
     try:
         payload = jwt.decode(
-            credentials.credentials,
-            settings.JWT_SECRET_KEY,
+            token,
+            key,
+            # Pinning the algorithm list (rather than trusting whatever
+            # `alg` the token claims) is what closes the classic
+            # "alg: none" / algorithm-confusion JWT attacks.
             algorithms=[settings.JWT_ALGORITHM],
+            audience=settings.JWT_AUDIENCE,
+            leeway=settings.JWT_LEEWAY_SECONDS,
+            options={"require": ["exp", "aud"]},
         )
-    except JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     if payload.get("type") != "access":

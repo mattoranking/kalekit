@@ -45,7 +45,7 @@ from kalekit.auth.service import (
     hash_refresh_token,
     hash_verification_token,
     verification_token_expiry,
-    verify_password,
+    verify_and_upgrade_password,
 )
 from kalekit.config import settings
 from kalekit.models.user import User
@@ -118,12 +118,20 @@ async def login(
     # being skipped for unknown emails would let an attacker enumerate
     # registered accounts by measuring response latency.
     password_hash = (user.password_hash if user else None) or DUMMY_PASSWORD_HASH
-    password_valid = verify_password(body.password, password_hash)
+    password_valid, upgraded_hash = verify_and_upgrade_password(
+        body.password, password_hash
+    )
 
     if not user or not password_valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
+
+    # Transparently move a legacy (pre-pwdlib) bcrypt hash onto Argon2
+    # now that we know the plaintext password -- no forced reset needed.
+    if upgraded_hash is not None:
+        user.password_hash = upgraded_hash
+        await session.flush()
     if settings.REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN and not user.email_verified:
         raise HTTPException(status_code=403, detail="Email verification required")
 

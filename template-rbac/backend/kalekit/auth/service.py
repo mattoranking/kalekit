@@ -4,12 +4,19 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from jose import jwt
-from passlib.context import CryptContext
+import jwt
+from pwdlib import PasswordHash
+from pwdlib.hashers.argon2 import Argon2Hasher
+from pwdlib.hashers.bcrypt import BcryptHasher
 
 from kalekit.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Argon2 is the preferred scheme for new hashes (per current FastAPI
+# docs); bcrypt is kept as a second, verify-only hasher purely so
+# accounts created before this migration -- whose password_hash is
+# still a bcrypt hash -- keep working. See verify_and_upgrade_password
+# for how those get transparently moved onto Argon2 on next login.
+password_hash = PasswordHash([Argon2Hasher(), BcryptHasher()])
 
 # A precomputed bcrypt hash with no corresponding user, used to keep the
 # login timing profile identical whether or not the submitted email exists.
@@ -20,11 +27,22 @@ DUMMY_PASSWORD_HASH = "$2b$12$r2hOOyYQYASRXa2Vqre.AOXMiIKvq3fD3lvQnT6Pm8qx7hRVqp
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return password_hash.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    valid, _ = password_hash.verify_and_update(plain, hashed)
+    return valid
+
+
+def verify_and_upgrade_password(plain: str, hashed: str) -> tuple[bool, str | None]:
+    """Verify `plain` against `hashed`, same as verify_password, but also
+    return a re-hash under the current preferred scheme (Argon2) when
+    `hashed` used an older/non-preferred scheme -- e.g. a bcrypt hash
+    from before this migration. The caller (login) should persist the
+    returned hash when it isn't None, so legacy accounts are upgraded
+    transparently instead of needing a password reset."""
+    return password_hash.verify_and_update(plain, hashed)
 
 
 def generate_verification_token() -> str:
@@ -59,11 +77,17 @@ def create_access_token(
         "scopes": scopes,
         "type": "access",
         "exp": expire,
+        "aud": settings.JWT_AUDIENCE,
     }
     return jwt.encode(
         payload,
         settings.JWT_SECRET_KEY,
         algorithm=settings.JWT_ALGORITHM,
+        # `kid` identifies which key signed this token, so a secret can
+        # be rotated (new JWT_SECRET_KEY + JWT_KID, old one moved into
+        # JWT_PREVIOUS_KEYS) without invalidating tokens already issued
+        # under the previous key. See _decode_access_token.
+        headers={"kid": settings.JWT_KID},
     )
 
 
