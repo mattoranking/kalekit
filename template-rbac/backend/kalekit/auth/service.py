@@ -11,6 +11,13 @@ from kalekit.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# A precomputed bcrypt hash with no corresponding user, used to keep the
+# login timing profile identical whether or not the submitted email exists.
+# Without this, `find_user_by_email` returning None would let login skip
+# the (comparatively slow) hash verification entirely, letting an attacker
+# distinguish "no such account" from "wrong password" by response time.
+DUMMY_PASSWORD_HASH = "$2b$12$r2hOOyYQYASRXa2Vqre.AOXMiIKvq3fD3lvQnT6Pm8qx7hRVqppxS"
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
