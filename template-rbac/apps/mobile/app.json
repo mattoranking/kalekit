@@ -14,7 +14,11 @@
     "android": {
       "package": "dev.kalekit.local"
     },
-    "plugins": ["expo-router", "expo-updates"],
+    "plugins": [
+      "expo-router",
+      "expo-updates",
+      "expo-secure-store"
+    ],
     "runtimeVersion": {
       "policy": "fingerprint"
     },
