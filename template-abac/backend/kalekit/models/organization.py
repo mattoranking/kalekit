@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import ForeignKey, String, Uuid
+from sqlalchemy import ForeignKey, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kalekit.utils.db.models import RecordModel
@@ -31,11 +31,16 @@ class OrganizationMember(RecordModel):
     """
 
     __tablename__ = "organization_members"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "user_id"),
+    )
 
     organization_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("organizations.id"), nullable=False
     )
-    user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("users.id"), nullable=False, index=True
+    )
 
     organization: Mapped["Organization"] = relationship(
         back_populates="members", lazy="selectin"

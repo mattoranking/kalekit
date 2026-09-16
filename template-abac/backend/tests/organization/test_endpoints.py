@@ -1,5 +1,11 @@
+import uuid
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from kalekit.models.organization import OrganizationMember
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -63,3 +69,40 @@ async def test_inviting_an_unknown_email_fails(
     )
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_adding_an_existing_member_is_idempotent(
+    client: AsyncClient,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
+) -> None:
+    """Adding the same user twice returns 409 and never creates a second row."""
+    await register("alice@example.com")
+    await register("bob@example.com")
+    token_alice = await login("alice@example.com")
+    org_a = await org_id_for("alice@example.com")
+
+    first = await client.post(
+        f"/v1/organizations/{org_a}/members",
+        json={"email": "bob@example.com"},
+        headers=auth_header(token_alice),
+    )
+    assert first.status_code == 201
+
+    second = await client.post(
+        f"/v1/organizations/{org_a}/members",
+        json={"email": "bob@example.com"},
+        headers=auth_header(token_alice),
+    )
+    assert second.status_code == 409
+
+    result = await session.execute(
+        select(func.count())
+        .select_from(OrganizationMember)
+        .where(OrganizationMember.organization_id == uuid.UUID(org_a))
+    )
+    assert result.scalar_one() == 2  # alice (owner) + bob, no duplicate
