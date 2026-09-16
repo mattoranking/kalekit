@@ -10,6 +10,7 @@ permanent, self-inflicted lockout with no self-service recovery.
 """
 
 import asyncio
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -77,8 +78,8 @@ async def test_reinviting_existing_member_returns_409(
         (
             await session.execute(
                 select(OrganizationMember).where(
-                    OrganizationMember.organization_id == org,
-                    OrganizationMember.user_id == first.json()["user_id"],
+                    OrganizationMember.organization_id == uuid.UUID(org),
+                    OrganizationMember.user_id == uuid.UUID(first.json()["user_id"]),
                 )
             )
         )
@@ -103,8 +104,6 @@ async def test_concurrent_invites_race_exactly_one_wins(
     `created=True` and the other `created=False`, and the DB ends up
     with exactly one row.
     """
-    import uuid
-
     organization_id, user_id = owner_and_org
 
     async def _invite() -> tuple[OrganizationMember, bool]:
