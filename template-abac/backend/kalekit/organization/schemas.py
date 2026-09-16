@@ -10,6 +10,10 @@ class OrganizationResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class OrganizationListResponse(BaseModel):
+    items: list[OrganizationResponse]
+
+
 class MemberResponse(BaseModel):
     user_id: uuid.UUID
     email: str

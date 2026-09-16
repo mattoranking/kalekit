@@ -4,21 +4,42 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import require_org_member
+from kalekit.auth.dependencies import get_current_user, require_org_member
 from kalekit.auth.repository import find_user_by_email
 from kalekit.models.user import User
-from kalekit.organization.repository import add_member, list_members
+from kalekit.organization.repository import (
+    add_member,
+    list_members,
+    list_user_organizations,
+)
 from kalekit.organization.schemas import (
     AddMemberRequest,
     MemberListResponse,
     MemberResponse,
+    OrganizationListResponse,
+    OrganizationResponse,
 )
 from kalekit.postgres import get_db_session
 
-router = APIRouter(prefix="/organizations/{organization_id}", tags=["organizations"])
+router = APIRouter(prefix="/organizations", tags=["organizations"])
+member_router = APIRouter(
+    prefix="/organizations/{organization_id}", tags=["organizations"]
+)
 
 
-@router.get("/members", response_model=MemberListResponse)
+@router.get("", response_model=OrganizationListResponse)
+async def get_my_organizations(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> OrganizationListResponse:
+    """Lists the organizations the caller is a member of."""
+    organizations = await list_user_organizations(session, user_id=user.id)
+    return OrganizationListResponse(
+        items=[OrganizationResponse.model_validate(org) for org in organizations]
+    )
+
+
+@member_router.get("/members", response_model=MemberListResponse)
 async def get_members(
     organization_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -35,7 +56,7 @@ async def get_members(
     )
 
 
-@router.post("/members", response_model=MemberResponse, status_code=201)
+@member_router.post("/members", response_model=MemberResponse, status_code=201)
 async def add_organization_member(
     organization_id: UUID,
     body: AddMemberRequest,
