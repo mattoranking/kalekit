@@ -66,10 +66,11 @@ async def login(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     user = await find_user_by_email(session, body.email)
+    password_hash = user.password_hash if user else None
     if (
         not user
-        or not user.password_hash
-        or not verify_password(body.password, user.password_hash)
+        or not password_hash
+        or not verify_password(body.password, password_hash)
     ):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
