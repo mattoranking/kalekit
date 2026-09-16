@@ -1,7 +1,12 @@
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import kalekit.auth.endpoints as auth_endpoints
+from kalekit.auth.repository import find_user_by_email
+from kalekit.config import settings
+
+LEGACY_BCRYPT_HASH = "$2b$12$fVcEWj4wDMGN/yfRQAywQOHPaZ3rPZ40inFuNlnwkGuym1KhnL1mu"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -11,6 +16,77 @@ async def test_login_succeeds_with_correct_password(register, login) -> None:
     token = await login("user@example.com", "correct-password")
 
     assert token
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_login_upgrades_a_legacy_bcrypt_hash_to_argon2(
+    client: AsyncClient, register, session: AsyncSession
+) -> None:
+    """Accounts created under the old passlib/bcrypt setup must keep
+    working after the pwdlib migration, and get quietly moved onto
+    Argon2 the next time they log in -- no forced password reset."""
+    email = "legacy-hash@example.com"
+    await register(email, "correct-password")
+
+    user = await find_user_by_email(session, email)
+    assert user is not None
+    # Simulate a pre-migration account: a stored bcrypt hash rather than
+    # the Argon2 hash `register` would have produced today.
+    user.password_hash = LEGACY_BCRYPT_HASH
+    await session.flush()
+
+    response = await client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "correct-password"},
+    )
+    assert response.status_code == 200
+
+    upgraded_user = await find_user_by_email(session, email)
+    assert upgraded_user is not None
+    assert upgraded_user.password_hash.startswith("$argon2")
+
+    # And the upgraded hash still logs the user in on a subsequent request.
+    second_response = await client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "correct-password"},
+    )
+    assert second_response.status_code == 200
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_login_rejected_for_unverified_email_does_not_upgrade_hash(
+    client: AsyncClient,
+    register,
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login that's ultimately rejected (here: unverified email, with
+    REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN on) must not have side
+    effects -- in particular it must not silently upgrade a legacy
+    bcrypt hash to Argon2 before the verification check runs. The
+    upgrade should only ever happen alongside an actual, successful
+    login.
+    """
+    monkeypatch.setattr(settings, "REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN", True)
+
+    email = "unverified-legacy-hash@example.com"
+    await register(email, "correct-password")
+
+    user = await find_user_by_email(session, email)
+    assert user is not None
+    assert user.email_verified is False
+    user.password_hash = LEGACY_BCRYPT_HASH
+    await session.flush()
+
+    response = await client.post(
+        "/v1/auth/login",
+        json={"email": email, "password": "correct-password"},
+    )
+    assert response.status_code == 403
+
+    unchanged_user = await find_user_by_email(session, email)
+    assert unchanged_user is not None
+    assert unchanged_user.password_hash == LEGACY_BCRYPT_HASH
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -70,13 +146,19 @@ async def test_unknown_email_still_performs_password_verification(
     away because no user was found.
     """
     calls: list[tuple[str, str]] = []
-    real_verify_password = auth_endpoints.verify_password
+    real_verify_and_upgrade_password = auth_endpoints.verify_and_upgrade_password
 
-    def _spy_verify_password(plain: str, hashed: str) -> bool:
+    def _spy_verify_and_upgrade_password(
+        plain: str, hashed: str
+    ) -> tuple[bool, str | None]:
         calls.append((plain, hashed))
-        return real_verify_password(plain, hashed)
+        return real_verify_and_upgrade_password(plain, hashed)
 
-    monkeypatch.setattr(auth_endpoints, "verify_password", _spy_verify_password)
+    monkeypatch.setattr(
+        auth_endpoints,
+        "verify_and_upgrade_password",
+        _spy_verify_and_upgrade_password,
+    )
 
     response = await client.post(
         "/v1/auth/login",
