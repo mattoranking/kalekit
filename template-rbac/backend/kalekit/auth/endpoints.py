@@ -38,6 +38,7 @@ from kalekit.auth.schemas import (
 )
 from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.auth.service import (
+    DUMMY_PASSWORD_HASH,
     create_access_token,
     generate_refresh_token,
     generate_verification_token,
@@ -110,7 +111,16 @@ async def login(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     user = await find_user_by_email(session, body.email)
-    if not user or not verify_password(body.password, user.password_hash):
+
+    # Always run a hash verification, even when the email doesn't exist,
+    # so the response timing for "unknown email" and "wrong password" is
+    # indistinguishable -- otherwise the (deliberately slow) bcrypt check
+    # being skipped for unknown emails would let an attacker enumerate
+    # registered accounts by measuring response latency.
+    password_hash = (user.password_hash if user else None) or DUMMY_PASSWORD_HASH
+    password_valid = verify_password(body.password, password_hash)
+
+    if not user or not password_valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
