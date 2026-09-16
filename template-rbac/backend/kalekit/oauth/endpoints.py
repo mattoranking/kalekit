@@ -16,7 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.permissions import get_redis, get_scopes_for_roles
-from kalekit.auth.service import create_access_token, create_refresh_token
+from kalekit.auth.repository import store_refresh_token
+from kalekit.auth.service import (
+    create_access_token,
+    generate_refresh_token,
+    hash_refresh_token,
+)
 from kalekit.oauth.client import OAUTH_PROVIDERS
 from kalekit.oauth.repository import OAuthAccountLinkingError, find_or_create_oauth_user
 from kalekit.postgres import get_db_session
@@ -136,11 +141,21 @@ async def oauth_callback(
     except OAuthAccountLinkingError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    # --- Issue our JWT pair ---
+    # --- Issue our token pair ---
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
     access_token = create_access_token(str(user.id), list(scopes))
-    refresh_token, _ = create_refresh_token(str(user.id))
+    refresh_token, expires_at = generate_refresh_token()
+
+    # Persist it like /auth/login does -- otherwise /auth/refresh (which
+    # now validates against the DB) can never find this token and every
+    # OAuth-issued refresh token would be permanently unusable.
+    await store_refresh_token(
+        session,
+        user_id=user.id,
+        token_hash=hash_refresh_token(refresh_token),
+        expires_at=expires_at,
+    )
 
     return {
         "access_token": access_token,

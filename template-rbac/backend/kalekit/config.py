@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    # How long, after a refresh token is rotated, its immediate
+    # predecessor may still be replayed and treated as a legitimate
+    # concurrent refresh (returning the same new pair) instead of
+    # triggering reuse detection. Needed because the web BFF runs as
+    # multiple serverless instances, so two requests can race to refresh
+    # the same token with no in-process lock to prevent it.
+    REFRESH_TOKEN_GRACE_PERIOD_SECONDS: int = 45
 
     # Email verification
     # When True, unverified accounts can't log in at all. When False
