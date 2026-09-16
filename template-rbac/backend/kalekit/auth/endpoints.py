@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -5,9 +6,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import get_current_jti, get_current_user
+from kalekit.auth.dependencies import (
+    get_current_jti,
+    get_current_session_id,
+    get_current_user,
+)
 from kalekit.auth.permissions import (
     block_all_user_tokens,
+    block_family_tokens,
     block_token,
     cache_refresh_grace_pair,
     get_cached_refresh_grace_pair,
@@ -17,22 +23,29 @@ from kalekit.auth.repository import (
     create_user,
     create_verification_token,
     find_user_by_email,
+    get_family_owner,
     get_refresh_token_by_hash,
     get_refresh_token_by_id,
     get_valid_verification_token,
     invalidate_user_verification_tokens,
+    list_user_sessions,
     mark_refresh_token_replaced,
     mark_verification_token_used,
     revoke_refresh_token_family,
     revoke_user_refresh_tokens,
+    revoke_user_refresh_tokens_except_family,
     store_refresh_token,
+    update_user_password,
 )
 from kalekit.auth.schemas import (
+    ChangePasswordRequest,
     LoginRequest,
     LogoutRequest,
     MessageResponse,
     RefreshRequest,
     RegisterRequest,
+    SessionListResponse,
+    SessionResponse,
     TokenResponse,
     UserResponse,
     VerifyEmailRequest,
@@ -41,6 +54,7 @@ from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.auth.service import (
     DUMMY_PASSWORD_HASH,
     create_access_token,
+    device_info_from_user_agent,
     generate_refresh_token,
     generate_verification_token,
     hash_refresh_token,
@@ -145,15 +159,22 @@ async def login(
 
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
-    access_token = create_access_token(str(user.id), list(scopes))
     refresh_token, expires_at = generate_refresh_token()
 
-    await store_refresh_token(
+    # Store the refresh token first so its (auto-generated) family_id
+    # exists to stamp the access token's `sid` claim with -- that's
+    # what ties this access token to the session /auth/sessions and
+    # DELETE /auth/sessions/{id} operate on.
+    token_row = await store_refresh_token(
         session,
         user_id=user.id,
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
         ip_address=request.client.host if request.client else None,
+        device_info=device_info_from_user_agent(request.headers.get("user-agent")),
+    )
+    access_token = create_access_token(
+        str(user.id), list(scopes), session_id=str(token_row.family_id)
     )
 
     return TokenResponse(
@@ -222,7 +243,9 @@ async def refresh(
 
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
-    new_access = create_access_token(str(user.id), list(scopes))
+    new_access = create_access_token(
+        str(user.id), list(scopes), session_id=str(token_row.family_id)
+    )
     new_refresh, new_expires_at = generate_refresh_token()
 
     new_token_row = await store_refresh_token(
@@ -232,6 +255,7 @@ async def refresh(
         token_hash=hash_refresh_token(new_refresh),
         expires_at=new_expires_at,
         ip_address=request.client.host if request.client else None,
+        device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
     await mark_refresh_token_replaced(session, token_row, new_token_row.id)
 
@@ -284,6 +308,84 @@ async def logout_all(
     await block_all_user_tokens(str(user.id))
     if jti:
         await block_token(jti)
+
+
+@router.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(
+    user: Annotated[User, Depends(get_current_user)],
+    session_id: Annotated[str | None, Depends(get_current_session_id)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """List the caller's active sessions (one entry per live token
+    family), most recently used first, with the one behind this
+    request's own access token marked `is_current`."""
+    families = await list_user_sessions(session, user.id)
+    items = [
+        SessionResponse(
+            id=tokens[0].family_id,
+            device_info=tokens[-1].device_info,
+            ip_address=tokens[-1].ip_address,
+            created_at=tokens[0].created_at,
+            last_used_at=tokens[-1].last_used_at,
+            is_current=session_id is not None
+            and str(tokens[0].family_id) == session_id,
+        )
+        for tokens in families
+    ]
+    items.sort(key=lambda s: s.last_used_at, reverse=True)
+    return SessionListResponse(items=items)
+
+
+@router.delete("/sessions/{session_id}", status_code=204)
+async def revoke_session(
+    session_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Revoke one of the caller's own sessions (a refresh token
+    family). 404s for a family that doesn't exist *or* belongs to
+    another user -- same response either way, so this can't be used to
+    probe whether some other user's session id exists."""
+    owner_id = await get_family_owner(session, session_id)
+    if owner_id is None or owner_id != user.id:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    await revoke_refresh_token_family(session, session_id)
+    # The refresh token is dead, but any access token already minted
+    # under this family is still valid for the rest of its natural
+    # lifetime unless explicitly blocked -- this is what makes
+    # revocation take effect immediately instead of up to
+    # ACCESS_TOKEN_EXPIRE_MINUTES later.
+    await block_family_tokens(str(session_id))
+
+
+@router.post("/change-password", response_model=MessageResponse)
+async def change_password(
+    body: ChangePasswordRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    session_id: Annotated[str | None, Depends(get_current_session_id)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Change the caller's password and sign out every other session,
+    keeping the one this request was made from alive -- a changed
+    password is meaningless if a session opened under the old one
+    (e.g. by whoever the password is being changed *because of*) is
+    still live elsewhere."""
+    if not user.password_hash or not verify_password(
+        body.current_password, user.password_hash
+    ):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    await update_user_password(session, user, body.new_password)
+
+    keep_family_id = uuid.UUID(session_id) if session_id else None
+    revoked_families = await revoke_user_refresh_tokens_except_family(
+        session, user.id, keep_family_id
+    )
+    for family_id in revoked_families:
+        await block_family_tokens(str(family_id))
+
+    return MessageResponse(detail="Password changed")
 
 
 @router.get("/me", response_model=UserResponse)

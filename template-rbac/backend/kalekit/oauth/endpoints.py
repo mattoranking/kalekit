@@ -23,7 +23,7 @@ from typing import Annotated
 from urllib.parse import urlencode, urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +33,7 @@ from kalekit.auth.repository import store_refresh_token
 from kalekit.auth.schemas import TokenResponse
 from kalekit.auth.service import (
     create_access_token,
+    device_info_from_user_agent,
     generate_refresh_token,
     hash_refresh_token,
 )
@@ -127,6 +128,7 @@ async def oauth_callback(
     provider: str,
     code: Annotated[str, Query()],
     state: Annotated[str, Query()],
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     """Handle the OAuth provider's redirect.
@@ -214,17 +216,26 @@ async def oauth_callback(
     # --- Issue our token pair ---
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
-    access_token = create_access_token(str(user.id), list(scopes))
     refresh_token, expires_at = generate_refresh_token()
 
     # Persist it like /auth/login does -- otherwise /auth/refresh (which
     # now validates against the DB) can never find this token and every
-    # OAuth-issued refresh token would be permanently unusable.
-    await store_refresh_token(
+    # OAuth-issued refresh token would be permanently unusable. Also
+    # capture device/IP the same way /auth/login does, so OAuth-created
+    # sessions show up the same as password-login ones in
+    # GET /auth/sessions, and stamp the family_id onto the access
+    # token's `sid` claim so it's identifiable as "the current session"
+    # there too.
+    token_row = await store_refresh_token(
         session,
         user_id=user.id,
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
+        ip_address=request.client.host if request.client else None,
+        device_info=device_info_from_user_agent(request.headers.get("user-agent")),
+    )
+    access_token = create_access_token(
+        str(user.id), list(scopes), session_id=str(token_row.family_id)
     )
 
     # --- Hand off to the frontend without tokens in the URL ---

@@ -33,6 +33,13 @@ async def create_user(
     return user
 
 
+async def update_user_password(
+    session: AsyncSession, user: User, new_password: str
+) -> None:
+    user.password_hash = hash_password(new_password)
+    await session.flush()
+
+
 async def create_verification_token(
     session: AsyncSession,
     *,
@@ -187,3 +194,77 @@ async def revoke_refresh_token_family(
     for token in result.scalars():
         token.revoked = True
     await session.flush()
+
+
+async def revoke_user_refresh_tokens_except_family(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    keep_family_id: uuid.UUID | None,
+) -> list[uuid.UUID]:
+    """End every session the user has *except* `keep_family_id`.
+
+    Used for "sign out everywhere else" flows (password change/reset):
+    the caller's own session survives, every other active family is
+    revoked. Pass `keep_family_id=None` to revoke everything (e.g. the
+    caller's access token doesn't carry a session id -- fail closed
+    rather than guess which family to spare).
+
+    Returns the distinct family_ids that were revoked, so the caller
+    can also block their live access tokens (see
+    kalekit.auth.permissions.block_family_tokens) -- revoking the
+    refresh token alone doesn't invalidate an access token still
+    inside its natural lifetime.
+    """
+    conditions = [
+        RefreshToken.user_id == user_id,
+        RefreshToken.revoked == False,  # noqa: E712
+    ]
+    if keep_family_id is not None:
+        conditions.append(RefreshToken.family_id != keep_family_id)
+
+    result = await session.execute(select(RefreshToken).where(*conditions))
+    revoked_families: set[uuid.UUID] = set()
+    for token in result.scalars():
+        token.revoked = True
+        revoked_families.add(token.family_id)
+    await session.flush()
+    return list(revoked_families)
+
+
+async def get_family_owner(
+    session: AsyncSession, family_id: uuid.UUID
+) -> uuid.UUID | None:
+    """The user_id that owns a token family, or None if the family
+    doesn't exist -- used to check ownership before revoking a session
+    without leaking whether the id belongs to someone else."""
+    result = await session.execute(
+        select(RefreshToken.user_id)
+        .where(RefreshToken.family_id == family_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_user_sessions(
+    session: AsyncSession, user_id: uuid.UUID
+) -> list[list[RefreshToken]]:
+    """Group the user's refresh tokens by family, one group per active
+    session (families with no unrevoked token left are dead sessions
+    and are excluded). Each group is sorted oldest-first, so
+    group[0].created_at is the session's start and group[-1] is its
+    most recent token (last_used_at, device_info, ip_address).
+    """
+    result = await session.execute(
+        select(RefreshToken)
+        .where(RefreshToken.user_id == user_id)
+        .order_by(RefreshToken.family_id, RefreshToken.created_at)
+    )
+    families: dict[uuid.UUID, list[RefreshToken]] = {}
+    for token in result.scalars():
+        families.setdefault(token.family_id, []).append(token)
+
+    return [
+        tokens
+        for tokens in families.values()
+        if any(not t.revoked for t in tokens)
+    ]
