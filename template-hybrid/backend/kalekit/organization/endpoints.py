@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import (
     OrgActor,
+    get_current_user,
     require_org_member,
     require_org_permission,
 )
@@ -18,10 +19,37 @@ from kalekit.organization.schemas import (
     AddMemberRequest,
     MemberListResponse,
     MemberResponse,
+    OrganizationListResponse,
+    OrganizationMembershipResponse,
 )
 from kalekit.postgres import get_db_session
 
+# Not scoped to a single organization_id -- this lists the caller's own
+# memberships, so it lives at /organizations rather than
+# /organizations/{organization_id}.
+list_router = APIRouter(prefix="/organizations", tags=["organizations"])
+
 router = APIRouter(prefix="/organizations/{organization_id}", tags=["organizations"])
+
+
+@list_router.get("", response_model=OrganizationListResponse)
+async def list_my_organizations(
+    user: Annotated[User, Depends(get_current_user)],
+) -> OrganizationListResponse:
+    """The organizations the caller belongs to, plus their role in each.
+
+    UX only -- for deciding what to show (e.g. "delete", "invite",
+    settings controls), not authorization. The API remains the
+    authority via `require_org_role` / `require_org_permission`.
+    """
+    return OrganizationListResponse(
+        items=[
+            OrganizationMembershipResponse(
+                id=m.organization.id, name=m.organization.name, role=m.role
+            )
+            for m in user.memberships
+        ]
+    )
 
 
 @router.get("/members", response_model=MemberListResponse)

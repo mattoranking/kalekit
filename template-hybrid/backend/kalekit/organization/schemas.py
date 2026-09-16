@@ -12,6 +12,25 @@ class OrganizationResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class OrganizationMembershipResponse(BaseModel):
+    """An organization plus the caller's role in it.
+
+    UX only -- clients use this to show/hide controls (e.g. "delete",
+    "invite"), but the API remains the authority on what a role can
+    actually do (see `require_org_role` / `require_org_permission`).
+    """
+
+    id: uuid.UUID
+    name: str
+    role: MemberRole
+
+    model_config = {"from_attributes": True}
+
+
+class OrganizationListResponse(BaseModel):
+    items: list[OrganizationMembershipResponse]
+
+
 class MemberResponse(BaseModel):
     user_id: uuid.UUID
     email: str
