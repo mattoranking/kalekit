@@ -2,6 +2,7 @@ import jwt
 import pytest
 
 from kalekit.auth.service import (
+    DUMMY_PASSWORD_HASH,
     create_access_token,
     hash_password,
     verify_and_upgrade_password,
@@ -19,6 +20,16 @@ def test_hash_password_produces_an_argon2_hash() -> None:
     hashed = hash_password("correct-password")
 
     assert hashed.startswith("$argon2")
+
+
+def test_dummy_password_hash_is_argon2() -> None:
+    """DUMMY_PASSWORD_HASH stands in for a real account's hash on the
+    "no such user" login path, so it has to be verified with the same
+    primary algorithm (Argon2) as an actual account -- otherwise an
+    unknown-email request and a real-account wrong-password request
+    are timed against different algorithms, reopening the timing
+    side-channel this dummy hash exists to close."""
+    assert DUMMY_PASSWORD_HASH.startswith("$argon2")
 
 
 def test_verify_password_accepts_correct_password() -> None:

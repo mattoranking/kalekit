@@ -18,12 +18,32 @@ from kalekit.config import settings
 # for how those get transparently moved onto Argon2 on next login.
 password_hash = PasswordHash([Argon2Hasher(), BcryptHasher()])
 
-# A precomputed bcrypt hash with no corresponding user, used to keep the
-# login timing profile identical whether or not the submitted email exists.
+# A precomputed hash with no corresponding user, used to keep the login
+# timing profile identical whether or not the submitted email exists.
 # Without this, `find_user_by_email` returning None would let login skip
 # the (comparatively slow) hash verification entirely, letting an attacker
 # distinguish "no such account" from "wrong password" by response time.
-DUMMY_PASSWORD_HASH = "$2b$12$r2hOOyYQYASRXa2Vqre.AOXMiIKvq3fD3lvQnT6Pm8qx7hRVqppxS"
+#
+# This must stay an Argon2 hash (the same scheme `hash_password` now
+# produces for every new/upgraded account) rather than the bcrypt hash
+# used before this migration -- verifying against a different algorithm
+# than the common case would reintroduce a timing side-channel of its
+# own (unknown-email requests bcrypt-timed vs. real-account requests
+# Argon2-timed) if the two algorithms' wall-clock cost differs.
+# Hardcoded rather than computed at import time to avoid adding
+# startup-time variance.
+#
+# Note this doesn't make login fully constant-time during the
+# migration window itself: an existing account whose hash hasn't yet
+# been upgraded (see verify_and_upgrade_password) is still verified
+# against bcrypt, not Argon2, until its next successful login. That's
+# an inherent, unavoidable side effect of migrating hash algorithms in
+# place, not something a single dummy-hash choice can fix -- matching
+# the new default here is still the right call for the steady state.
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4"
+    "$trD9/9MVHdqUHmI1ujzBGQ$sYhVtOBGIDR2cGcALLbDhC/z7xMEdMVZh6Ui8NNDJzY"
+)
 
 
 def hash_password(password: str) -> str:
