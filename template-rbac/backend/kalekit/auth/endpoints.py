@@ -319,18 +319,18 @@ async def list_sessions(
     """List the caller's active sessions (one entry per live token
     family), most recently used first, with the one behind this
     request's own access token marked `is_current`."""
-    families = await list_user_sessions(session, user.id)
+    sessions = await list_user_sessions(session, user.id)
     items = [
         SessionResponse(
-            id=tokens[0].family_id,
-            device_info=tokens[-1].device_info,
-            ip_address=tokens[-1].ip_address,
-            created_at=tokens[0].created_at,
-            last_used_at=tokens[-1].last_used_at,
+            id=summary.family_id,
+            device_info=summary.device_info,
+            ip_address=summary.ip_address,
+            created_at=summary.created_at,
+            last_used_at=summary.last_used_at,
             is_current=session_id is not None
-            and str(tokens[0].family_id) == session_id,
+            and str(summary.family_id) == session_id,
         )
-        for tokens in families
+        for summary in sessions
     ]
     items.sort(key=lambda s: s.last_used_at, reverse=True)
     return SessionListResponse(items=items)
@@ -384,6 +384,21 @@ async def change_password(
     )
     for family_id in revoked_families:
         await block_family_tokens(str(family_id))
+
+    if session_id is None:
+        # The caller's own access token has no `sid` claim, so there's
+        # no family id to spare it from being blocked above -- every
+        # family (including whichever one minted this very token) was
+        # just revoked. Falling back to block_all_user_tokens fails
+        # closed: the promise is "everywhere else is signed out
+        # immediately", and leaving this access token usable until its
+        # natural expiry would quietly break that for this edge case
+        # (tokens minted before `sid` existed, or issued outside
+        # login/refresh/OAuth). This does mean the *current* request's
+        # own token also becomes unusable next call, since we can't
+        # tell it apart from the others without a session id -- an
+        # acceptable trade next to leaving a live token unrevoked.
+        await block_all_user_tokens(str(user.id))
 
     return MessageResponse(detail="Password changed")
 

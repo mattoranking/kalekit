@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -245,14 +246,27 @@ async def get_family_owner(
     return result.scalar_one_or_none()
 
 
+@dataclass
+class SessionSummary:
+    family_id: uuid.UUID
+    created_at: datetime
+    last_used_at: datetime
+    device_info: str | None
+    ip_address: str | None
+
+
 async def list_user_sessions(
     session: AsyncSession, user_id: uuid.UUID
-) -> list[list[RefreshToken]]:
-    """Group the user's refresh tokens by family, one group per active
-    session (families with no unrevoked token left are dead sessions
-    and are excluded). Each group is sorted oldest-first, so
-    group[0].created_at is the session's start and group[-1] is its
-    most recent token (last_used_at, device_info, ip_address).
+) -> list[SessionSummary]:
+    """One summary per *active* session (token family): families with
+    no token that's both unrevoked and unexpired are dead sessions
+    (naturally expired or fully revoked) and are excluded entirely --
+    a user shouldn't see a "session" in the list they can't actually
+    do anything with. `created_at` is the family's oldest token (i.e.
+    the session's start, even if that first token has since rotated
+    out or expired); `last_used_at`/`device_info`/`ip_address` come
+    from the most recent token that's still usable, not merely the
+    most recently created one.
     """
     result = await session.execute(
         select(RefreshToken)
@@ -263,8 +277,20 @@ async def list_user_sessions(
     for token in result.scalars():
         families.setdefault(token.family_id, []).append(token)
 
-    return [
-        tokens
-        for tokens in families.values()
-        if any(not t.revoked for t in tokens)
-    ]
+    now = datetime.now(timezone.utc)
+    summaries: list[SessionSummary] = []
+    for family_id, tokens in families.items():
+        usable = [t for t in tokens if not t.revoked and t.expires_at > now]
+        if not usable:
+            continue
+        latest = max(usable, key=lambda t: t.created_at)
+        summaries.append(
+            SessionSummary(
+                family_id=family_id,
+                created_at=tokens[0].created_at,
+                last_used_at=latest.last_used_at,
+                device_info=latest.device_info,
+                ip_address=latest.ip_address,
+            )
+        )
+    return summaries

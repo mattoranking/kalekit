@@ -1,5 +1,9 @@
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from kalekit.auth.repository import find_user_by_email
+from kalekit.auth.service import create_access_token
 
 
 async def _login_pair(
@@ -105,3 +109,38 @@ async def test_change_password_requires_authentication(client: AsyncClient) -> N
         json={"current_password": "password123", "new_password": "newpassword456"},
     )
     assert response.status_code in (401, 403)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_change_password_without_a_session_id_blocks_every_access_token(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    """Some access tokens carry no `sid` claim (minted outside
+    login/refresh/OAuth, or by older code). change-password can't
+    spare "the current one" on the access-token side without a family
+    id to exempt, so it must fail closed -- block every access token
+    the user holds -- rather than silently leave the caller's own
+    token usable until it naturally expires."""
+    email = "change-pw-no-sid@example.com"
+    normal_access_token, _ = await _login_pair(client, email)
+
+    user = await find_user_by_email(session, email)
+    assert user is not None
+    sidless_token = create_access_token(str(user.id), [])
+
+    response = await client.post(
+        "/v1/auth/change-password",
+        headers=_auth(sidless_token),
+        json={"current_password": "password123", "new_password": "newpassword456"},
+    )
+    assert response.status_code == 200
+
+    # The very token that made the request is blocked afterward...
+    after = await client.get("/v1/auth/me", headers=_auth(sidless_token))
+    assert after.status_code == 401
+
+    # ...and so is every other access token the user held.
+    also_blocked = await client.get(
+        "/v1/auth/me", headers=_auth(normal_access_token)
+    )
+    assert also_blocked.status_code == 401

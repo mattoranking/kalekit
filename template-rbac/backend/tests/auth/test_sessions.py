@@ -1,5 +1,12 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from kalekit.auth.repository import find_user_by_email
+from kalekit.models.refresh_token import RefreshToken
 
 
 async def _login_pair(
@@ -138,6 +145,31 @@ async def test_cannot_revoke_another_users_session(client: AsyncClient) -> None:
     # The victim's session must still be alive/unaffected.
     still_there = await client.get("/v1/auth/sessions", headers=_auth(access_token_a))
     assert len(still_there.json()["items"]) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_expired_but_unrevoked_session_is_not_listed(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    """A refresh token that expired naturally (never explicitly
+    revoked) shouldn't show up as an active session -- the user can't
+    actually do anything with it, so listing it would be misleading."""
+    email = "sessions-expired@example.com"
+    access_token, _ = await _login_pair(client, email)
+
+    user = await find_user_by_email(session, email)
+    assert user is not None
+    result = await session.execute(
+        select(RefreshToken).where(RefreshToken.user_id == user.id)
+    )
+    token_row = result.scalar_one()
+    token_row.expires_at = datetime.now(timezone.utc) - timedelta(days=1)
+    await session.flush()
+
+    response = await client.get("/v1/auth/sessions", headers=_auth(access_token))
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []
 
 
 @pytest.mark.asyncio(loop_scope="session")
