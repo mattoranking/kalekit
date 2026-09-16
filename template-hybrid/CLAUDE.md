@@ -95,6 +95,18 @@ Separate account types per audience where their data differs. Verification
 status, payout details, and audience-specific settings belong to their audience.
 Ratings/metrics are scoped per side and never averaged together.
 
+**Ownership checks alongside role checks (ABAC inside Hybrid).** Not every
+authorization decision fits "does this role have permission X?" — some are
+"does this caller relate to *this record* the right way?" `DELETE
+/chat/{message_id}` is the reference case: the endpoint depends on
+`require_org_permission("chat:read")` only to establish membership, loads the
+message, then allows the delete if the caller is `chat:delete`-permitted *or*
+is the message's own author (`message.user_id == caller.user.id`). Load the
+record first, compare a field on it against the caller, and only reach for the
+role-permission check as the fallback — don't try to force a per-record
+ownership rule into `ROLE_PERMISSIONS`. See
+`backend/kalekit/chat/endpoints.py::delete_message_endpoint`.
+
 ## The admin panel is the product
 
 For the first hundred records, a human does the matching and fixes the edge

@@ -9,6 +9,7 @@ from kalekit.auth.dependencies import (
     require_org_member,
     require_org_permission,
 )
+from kalekit.auth.roles import role_has_permission
 from kalekit.chat.repository import (
     create_message,
     delete_message,
@@ -62,12 +63,25 @@ async def delete_message_endpoint(
     organization_id: UUID,
     message_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    _caller: Annotated[OrgActor, Depends(require_org_permission("chat:delete"))],
+    caller: Annotated[OrgActor, Depends(require_org_permission("chat:read"))],
 ) -> None:
-    """Deleting needs `chat:delete` — a `member` is refused."""
+    """Deleting needs `chat:delete` — *or* being the message's own author.
+
+    This is the ABAC-inside-Hybrid case: the role-based gate above only
+    establishes membership (every role has `chat:read`), and the real
+    authorization decision — is this caller allowed to delete *this*
+    message? — happens below, once the message is loaded, by comparing
+    against a *value on the record* (its author) rather than a role.
+    """
     message = await get_message(
         session, organization_id=organization_id, message_id=message_id
     )
     if message is None:
         raise HTTPException(status_code=404, detail="Not found")
+    is_author = message.user_id == caller.user.id
+    if not is_author and not role_has_permission(caller.role, "chat:delete"):
+        raise HTTPException(
+            status_code=403,
+            detail="Requires the 'chat:delete' permission or message authorship",
+        )
     await delete_message(session, message=message)

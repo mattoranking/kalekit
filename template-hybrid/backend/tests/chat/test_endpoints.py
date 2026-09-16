@@ -36,7 +36,7 @@ async def test_viewer_can_read_but_not_post(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_member_can_post_but_not_delete(
+async def test_member_can_post_and_delete_own_message(
     client: AsyncClient, register, login, auth_header, org_id_for
 ) -> None:
     await register("owner@example.com")
@@ -54,8 +54,42 @@ async def test_member_can_post_but_not_delete(
     assert response.status_code == 201
     message_id = response.json()["id"]
 
+    # Authors may delete their own message even without `chat:delete`.
     response = await client.delete(
         f"/v1/organizations/{org}/chat/{message_id}", headers=auth_header(token_member)
+    )
+    assert response.status_code == 204
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_member_cannot_delete_others_message(
+    client: AsyncClient, register, login, auth_header, org_id_for
+) -> None:
+    await register("owner@example.com")
+    await register("member-one@example.com")
+    await register("member-two@example.com")
+    token_owner = await login("owner@example.com")
+    token_member_one = await login("member-one@example.com")
+    token_member_two = await login("member-two@example.com")
+    org = await org_id_for("owner@example.com")
+    await _invite(
+        client, org, token_owner, "member-one@example.com", "member", auth_header
+    )
+    await _invite(
+        client, org, token_owner, "member-two@example.com", "member", auth_header
+    )
+
+    response = await client.post(
+        f"/v1/organizations/{org}/chat/",
+        json={"content": "hi from member one"},
+        headers=auth_header(token_member_one),
+    )
+    assert response.status_code == 201
+    message_id = response.json()["id"]
+
+    response = await client.delete(
+        f"/v1/organizations/{org}/chat/{message_id}",
+        headers=auth_header(token_member_two),
     )
     assert response.status_code == 403
 
