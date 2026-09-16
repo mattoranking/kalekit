@@ -93,7 +93,11 @@ async def add_organization_member(
     user = await find_user_by_email(session, body.email)
     if user is None:
         raise HTTPException(status_code=404, detail="No user with that email")
-    await add_member(
+    member, created = await add_member(
         session, organization_id=organization_id, user_id=user.id, role=body.role
     )
-    return MemberResponse(user_id=user.id, email=user.email, role=body.role)
+    if not created:
+        raise HTTPException(
+            status_code=409, detail="User is already a member of this organization"
+        )
+    return MemberResponse(user_id=user.id, email=user.email, role=member.role)
