@@ -154,7 +154,11 @@ async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) ->
     kept. TTL matches access token lifetime.
     """
     r = await get_redis()
-    ttl = ttl_seconds or settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    ttl = (
+        ttl_seconds
+        if ttl_seconds is not None
+        else settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    )
     await r.set(f"blocked_family:{family_id}", "1", ex=ttl)
 
 

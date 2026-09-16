@@ -384,19 +384,28 @@ async def change_password(
 
     await update_user_password(session, user, body.new_password)
 
-    keep_family_id = uuid.UUID(session_id) if session_id else None
+    # `sid` is best-effort: treat a missing *or* malformed claim the
+    # same way -- as "no session tied to this token" -- rather than
+    # letting a bad UUID string 500 this request. The token is
+    # attacker-influenceable in principle, so this has to fail closed,
+    # not raise.
+    try:
+        keep_family_id = uuid.UUID(session_id) if session_id else None
+    except ValueError:
+        keep_family_id = None
+
     revoked_families = await revoke_user_refresh_tokens_except_family(
         session, user.id, keep_family_id
     )
     for family_id in revoked_families:
         await block_family_tokens(str(family_id))
 
-    if session_id is None:
-        # The caller's own access token has no `sid` claim, so there's
-        # no family id to spare it from being blocked above -- every
-        # family (including whichever one minted this very token) was
-        # just revoked. Falling back to block_all_user_tokens fails
-        # closed: the promise is "everywhere else is signed out
+    if keep_family_id is None:
+        # The caller's own access token has no (usable) session id, so
+        # there's no family id to spare it from being blocked above --
+        # every family (including whichever one minted this very
+        # token) was just revoked. Falling back to block_all_user_tokens
+        # fails closed: the promise is "everywhere else is signed out
         # immediately", and leaving this access token usable until its
         # natural expiry would quietly break that for this edge case
         # (tokens minted before `sid` existed, or issued outside

@@ -1,9 +1,31 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from httpx import AsyncClient
+from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import find_user_by_email
 from kalekit.auth.service import create_access_token
+from kalekit.config import settings
+
+
+def _access_token_with_bad_sid(user_id: str) -> str:
+    """A hand-built access token with a malformed `sid` claim -- the
+    kind create_access_token would never itself produce, but the token
+    is attacker-influenceable in principle, so the endpoint has to
+    survive a bad one rather than crash on it."""
+    payload = {
+        "sub": user_id,
+        "jti": "bad-sid-test-jti",
+        "scopes": [],
+        "type": "access",
+        "sid": "not-a-uuid",
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+    }
+    return jwt.encode(
+        payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
+    )
 
 
 async def _login_pair(
@@ -144,3 +166,26 @@ async def test_change_password_without_a_session_id_blocks_every_access_token(
         "/v1/auth/me", headers=_auth(normal_access_token)
     )
     assert also_blocked.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_change_password_with_a_malformed_sid_fails_closed_not_500(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    """`sid` is attacker-influenceable in principle -- a malformed
+    value must be treated the same as no session id (fall back to
+    block_all_user_tokens) instead of an unguarded uuid.UUID() parse
+    turning it into an unhandled 500."""
+    email = "change-pw-bad-sid@example.com"
+    await _login_pair(client, email)
+
+    user = await find_user_by_email(session, email)
+    assert user is not None
+    bad_sid_token = _access_token_with_bad_sid(str(user.id))
+
+    response = await client.post(
+        "/v1/auth/change-password",
+        headers=_auth(bad_sid_token),
+        json={"current_password": "password123", "new_password": "newpassword456"},
+    )
+    assert response.status_code == 200

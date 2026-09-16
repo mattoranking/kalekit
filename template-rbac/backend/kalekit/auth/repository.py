@@ -283,7 +283,7 @@ async def list_user_sessions(
         usable = [t for t in tokens if not t.revoked and t.expires_at > now]
         if not usable:
             continue
-        latest = max(usable, key=lambda t: t.created_at)
+        latest = max(usable, key=lambda t: t.last_used_at)
         summaries.append(
             SessionSummary(
                 family_id=family_id,
