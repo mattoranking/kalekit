@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -5,10 +6,19 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import get_current_jti, get_current_user
-from kalekit.auth.permissions import block_token, get_scopes_for_roles
+from kalekit.auth.permissions import (
+    block_token,
+    cache_refresh_grace_pair,
+    get_cached_refresh_grace_pair,
+    get_scopes_for_roles,
+)
 from kalekit.auth.repository import (
     create_user,
     find_user_by_email,
+    get_refresh_token_by_hash,
+    get_refresh_token_by_id,
+    mark_refresh_token_replaced,
+    revoke_refresh_token_family,
     revoke_user_refresh_tokens,
     store_refresh_token,
 )
@@ -22,10 +32,11 @@ from kalekit.auth.schemas import (
 from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.auth.service import (
     create_access_token,
-    create_refresh_token,
-    hash_password,
+    generate_refresh_token,
+    hash_refresh_token,
     verify_password,
 )
+from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 
@@ -75,12 +86,12 @@ async def login(
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
     access_token = create_access_token(str(user.id), list(scopes))
-    refresh_token, expires_at = create_refresh_token(str(user.id))
+    refresh_token, expires_at = generate_refresh_token()
 
     await store_refresh_token(
         session,
         user_id=user.id,
-        token_hash=hash_password(refresh_token),
+        token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
         ip_address=request.client.host if request.client else None,
     )
@@ -96,44 +107,81 @@ async def refresh(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
-    from jose import JWTError
-    from jose import jwt as jose_jwt
+    presented_hash = hash_refresh_token(body.refresh_token)
+    token_row = await get_refresh_token_by_hash(session, presented_hash)
 
-    from kalekit.config import settings
-
-    try:
-        payload = jose_jwt.decode(
-            body.refresh_token,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-        )
-        if payload.get("type") != "refresh":
-            raise HTTPException(status_code=401, detail="Invalid token type")
-        user_id = payload.get("sub")
-    except JWTError:
+    if token_row is None:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    user = await session.get(User, user_id)
+    now = datetime.now(timezone.utc)
+
+    if token_row.revoked:
+        # No successor recorded: this row was revoked directly (logout,
+        # or a previous reuse that revoked the whole family), not
+        # rotated. Nothing here is eligible for the grace window.
+        if token_row.replaced_by is None:
+            raise HTTPException(status_code=401, detail="Refresh token revoked")
+
+        successor = await get_refresh_token_by_id(session, token_row.replaced_by)
+
+        # Only the *direct* predecessor of the currently-active token
+        # gets grace-window leniency -- i.e. its successor must itself
+        # still be the active (unrevoked) tip of the chain. Reuse of
+        # anything further back always revokes the family, regardless
+        # of timing.
+        is_direct_predecessor = successor is not None and not successor.revoked
+
+        rotated_at = token_row.updated_at or token_row.created_at
+        within_grace_window = (
+            now - rotated_at
+        ).total_seconds() <= settings.REFRESH_TOKEN_GRACE_PERIOD_SECONDS
+
+        if is_direct_predecessor and within_grace_window:
+            cached = await get_cached_refresh_grace_pair(presented_hash)
+            if cached is not None:
+                return TokenResponse(**cached)
+            # Cache entry expired/evicted -- ambiguous, so fail closed
+            # for this request without punishing the whole family: a
+            # concurrent legitimate refresh may simply have to retry.
+            raise HTTPException(
+                status_code=401, detail="Refresh token already used"
+            )
+
+        # Reuse outside the grace window, or of a token older than the
+        # direct predecessor: treat as a stolen/replayed token and kill
+        # every token in the family.
+        await revoke_refresh_token_family(session, token_row.family_id)
+        raise HTTPException(status_code=401, detail="Refresh token already used")
+
+    if token_row.expires_at < now:
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+
+    user = await session.get(User, token_row.user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
-
-    # Rotate: revoke all old tokens, issue new pair
-    await revoke_user_refresh_tokens(session, user.id)
 
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
     new_access = create_access_token(str(user.id), list(scopes))
-    new_refresh, expires_at = create_refresh_token(str(user.id))
+    new_refresh, new_expires_at = generate_refresh_token()
 
-    await store_refresh_token(
+    new_token_row = await store_refresh_token(
         session,
         user_id=user.id,
-        token_hash=hash_password(new_refresh),
-        expires_at=expires_at,
+        family_id=token_row.family_id,
+        token_hash=hash_refresh_token(new_refresh),
+        expires_at=new_expires_at,
         ip_address=request.client.host if request.client else None,
     )
+    await mark_refresh_token_replaced(session, token_row, new_token_row.id)
 
-    return TokenResponse(access_token=new_access, refresh_token=new_refresh)
+    response = TokenResponse(access_token=new_access, refresh_token=new_refresh)
+    await cache_refresh_grace_pair(
+        presented_hash,
+        response.model_dump(),
+        ttl_seconds=settings.REFRESH_TOKEN_GRACE_PERIOD_SECONDS,
+    )
+    return response
 
 
 @router.post("/logout", status_code=204)

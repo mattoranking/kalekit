@@ -140,3 +140,41 @@ async def is_user_blocked(user_id: str) -> bool:
     """Check if all of this user's tokens were flagged as revoked."""
     r = await get_redis()
     return await r.exists(f"blocked_user:{user_id}") > 0
+
+
+# ---------------------------------------------------------------------------
+# Refresh grace window: let two concurrent /auth/refresh calls presenting
+# the same (about-to-be-rotated) token both get back the identical new
+# pair, instead of the second one being treated as reuse.
+# ---------------------------------------------------------------------------
+
+_REFRESH_GRACE_PREFIX = "refresh_grace:"
+
+
+async def cache_refresh_grace_pair(
+    old_token_hash: str, payload: dict, ttl_seconds: int
+) -> None:
+    """Remember the (access_token, refresh_token) pair issued when
+    `old_token_hash` was rotated, keyed by the token that was rotated
+    away. A second caller racing in with the same old token within
+    `ttl_seconds` gets this exact pair back instead of a fresh one, so
+    both callers end up holding the same, single new refresh token.
+    """
+    if ttl_seconds <= 0:
+        # A zero/negative grace period means the feature is effectively
+        # disabled -- nothing to cache.
+        return
+    r = await get_redis()
+    await r.set(
+        f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
+        json.dumps(payload),
+        ex=ttl_seconds,
+    )
+
+
+async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
+    r = await get_redis()
+    cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    if cached is None:
+        return None
+    return json.loads(cached)
