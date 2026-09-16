@@ -42,11 +42,17 @@ async def owner_and_org(engine: AsyncEngine) -> tuple[str, str]:
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_reinviting_existing_member_returns_409(
-    client, register, login, auth_header, org_id_for
+    client, register, login, auth_header, org_id_for, session: AsyncSession
 ) -> None:
     """Sequential duplicate invite: the second call must be rejected, not
     create a second row -- the acceptance criterion in the issue is
-    explicit that this must not merely be caught by the race test."""
+    explicit that this must not merely be caught by the race test.
+
+    Also proves no privilege escalation slips through: the rejected
+    second invite asks for `admin`, so this also checks the existing
+    row's role is still `member` afterwards -- the scenario the issue
+    calls out as the privilege-escalation vector for this bug.
+    """
     await register("owner@example.com")
     await register("member@example.com")
     token_owner = await login("owner@example.com")
@@ -66,6 +72,21 @@ async def test_reinviting_existing_member_returns_409(
     )
 
     assert second.status_code == 409
+
+    rows = (
+        (
+            await session.execute(
+                select(OrganizationMember).where(
+                    OrganizationMember.organization_id == org,
+                    OrganizationMember.user_id == first.json()["user_id"],
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].role == MemberRole.member
 
 
 @pytest.mark.asyncio(loop_scope="session")

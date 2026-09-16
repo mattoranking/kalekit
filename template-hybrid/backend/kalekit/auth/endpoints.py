@@ -49,6 +49,10 @@ async def register(
     # person who creates an organization is always its owner.
     org_name = body.organization_name or f"{body.email.split('@')[0]}'s workspace"
     organization = await create_organization(session, name=org_name)
+    # add_member returns (member, created); discarded here on purpose --
+    # this is a brand-new organization, so the membership is always
+    # freshly created (created=True). Don't assume that still holds if
+    # this call site ever changes to reuse an existing organization.
     await add_member(
         session,
         organization_id=organization.id,

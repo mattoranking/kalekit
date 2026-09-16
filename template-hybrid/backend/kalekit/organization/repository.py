@@ -46,7 +46,7 @@ async def add_member(
     session.add(member)
     try:
         await session.flush()
-    except IntegrityError as exc:
+    except IntegrityError:
         await session.rollback()
         existing = await session.execute(
             select(OrganizationMember).where(
@@ -60,7 +60,7 @@ async def add_member(
             # organization_id/user_id hitting a FK constraint. Re-raise
             # the original error instead of masking it with a confusing
             # NoResultFound from this re-fetch.
-            raise exc
+            raise
         return member, False
     return member, True
 
