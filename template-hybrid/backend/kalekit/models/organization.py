@@ -4,7 +4,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Enum, ForeignKey, String, Uuid
+from sqlalchemy import Enum, ForeignKey, Index, String, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kalekit.utils.db.models import RecordModel
@@ -42,6 +42,12 @@ class OrganizationMember(RecordModel):
     """
 
     __tablename__ = "organization_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "user_id", name="uq_organization_members_org_user"
+        ),
+        Index("ix_organization_members_user_id", "user_id"),
+    )
 
     organization_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("organizations.id"), nullable=False

@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import MemberRole, Organization, OrganizationMember
@@ -20,13 +21,48 @@ async def add_member(
     organization_id: uuid.UUID,
     user_id: uuid.UUID,
     role: MemberRole,
-) -> OrganizationMember:
+) -> tuple[OrganizationMember, bool]:
+    """Insert a membership row, or return the existing one.
+
+    Check-then-insert, with a DB-level `UniqueConstraint` as the real
+    guard against two concurrent invites racing past the initial check
+    -- the `IntegrityError` fallback is what makes the race safe, not
+    the check itself. Returns `(member, created)`; a caller that must
+    surface a 409 for an existing membership can key off `created`.
+    """
+    existing = await session.execute(
+        select(OrganizationMember).where(
+            OrganizationMember.organization_id == organization_id,
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    member = existing.scalar_one_or_none()
+    if member is not None:
+        return member, False
+
     member = OrganizationMember(
         organization_id=organization_id, user_id=user_id, role=role
     )
     session.add(member)
-    await session.flush()
-    return member
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        existing = await session.execute(
+            select(OrganizationMember).where(
+                OrganizationMember.organization_id == organization_id,
+                OrganizationMember.user_id == user_id,
+            )
+        )
+        member = existing.scalar_one_or_none()
+        if member is None:
+            # Not the uniqueness violation we expected -- e.g. a stale
+            # organization_id/user_id hitting a FK constraint. Re-raise
+            # the original error instead of masking it with a confusing
+            # NoResultFound from this re-fetch.
+            raise
+        return member, False
+    return member, True
 
 
 async def list_members(
