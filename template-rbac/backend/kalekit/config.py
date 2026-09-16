@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # Email verification
+    # When True, unverified accounts can't log in at all. When False
+    # (default), they can log in but require_verified_email gates
+    # anything beyond profile/resend-verification -- a kit can flip
+    # this per its own risk tolerance.
+    REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN: bool = False
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+    FRONTEND_URL: str = "http://localhost:3000"
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 

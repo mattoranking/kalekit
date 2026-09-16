@@ -1,3 +1,5 @@
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -16,6 +18,25 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return pwd_context.verify(plain, hashed)
+
+
+def generate_verification_token() -> str:
+    """A high-entropy, URL-safe random token to email the user."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_verification_token(token: str) -> str:
+    """sha256, not bcrypt: this token is already a 256-bit random
+    secret (not a low-entropy human password), so bcrypt's slow work
+    factor buys nothing -- a fast, deterministic hash is the right
+    tool, and it lets us look the token up by its hash directly."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def verification_token_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(
+        hours=settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS
+    )
 
 
 def create_access_token(

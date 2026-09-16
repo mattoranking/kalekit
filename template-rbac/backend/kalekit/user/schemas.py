@@ -8,6 +8,7 @@ class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     is_active: bool
+    email_verified: bool
     created_at: datetime
     roles: list[str] = []
 
