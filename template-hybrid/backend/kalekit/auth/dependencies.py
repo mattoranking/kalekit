@@ -8,6 +8,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.blocklist import is_token_blocked, is_user_blocked
 from kalekit.auth.roles import role_at_least, role_has_permission
 from kalekit.config import settings
 from kalekit.models.organization import MemberRole, OrganizationMember
@@ -30,13 +31,35 @@ async def get_current_user(
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Invalid token type")
         user_id = payload.get("sub")
+        jti = payload.get("jti")
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    if jti and await is_token_blocked(jti):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+    if user_id and await is_user_blocked(user_id):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = await session.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+async def get_current_jti(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> str | None:
+    """The current access token's unique id, for revoking it by itself
+    (e.g. on logout) rather than every token the user holds."""
+    try:
+        payload = jwt.decode(
+            credentials.credentials,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return payload.get("jti")
 
 
 async def _get_membership(

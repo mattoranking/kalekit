@@ -3,7 +3,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import get_current_user
+from kalekit.auth.blocklist import block_token
+from kalekit.auth.dependencies import get_current_jti, get_current_user
 from kalekit.auth.repository import (
     create_user,
     find_user_by_email,
@@ -141,9 +142,12 @@ async def refresh(
 @router.post("/logout", status_code=204)
 async def logout(
     user: Annotated[User, Depends(get_current_user)],
+    jti: Annotated[str | None, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     await revoke_user_refresh_tokens(session, user.id)
+    if jti:
+        await block_token(jti)
 
 
 @router.get("/me", response_model=UserResponse)
