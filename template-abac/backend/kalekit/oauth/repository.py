@@ -31,6 +31,7 @@ async def find_or_create_oauth_user(
     account_email: str | None,
     access_token: str,
     refresh_token: str | None = None,
+    display_name: str | None = None,
 ) -> User:
     """Link an OAuth identity to a User, creating one if needed.
 
@@ -38,6 +39,13 @@ async def find_or_create_oauth_user(
     1. Existing OAuthAccount(platform, account_id) → return linked User
     2. Existing User with matching email → link new OAuthAccount to them
     3. No match → create new User (password_hash=None) + OAuthAccount
+
+    `account_email` may be None for providers that don't expose an email
+    by default (e.g. Twitter/X). Rather than fabricate an unverifiable
+    "@oauth.local" address -- which breaks email verification/reset and
+    silently squats a namespace -- the user is stored with email=NULL.
+    A partial unique index on users.email allows any number of such
+    users to coexist.
     """
     # 1. Already linked?
     existing = await find_oauth_account(session, platform, account_id)
@@ -59,15 +67,19 @@ async def find_or_create_oauth_user(
     if user is None:
         user = User(
             id=uuid.uuid4(),
-            email=account_email or f"{platform}_{account_id}@oauth.local",
+            email=account_email,
             password_hash=None,
         )
         session.add(user)
         await session.flush()
 
-        organization = await create_organization(
-            session, name=f"{user.email.split('@')[0]}'s workspace"
-        )
+        # The org name must never be derived from the email address (its
+        # local part would leak to anyone later invited). Prefer the
+        # OAuth profile's display name when the provider gave us one,
+        # otherwise fall back to the same generic default as password
+        # signup.
+        org_name = f"{display_name}'s workspace" if display_name else "My workspace"
+        organization = await create_organization(session, name=org_name)
         await add_member(session, organization_id=organization.id, user_id=user.id)
 
     # Link the OAuth account

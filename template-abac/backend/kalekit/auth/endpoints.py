@@ -43,8 +43,10 @@ async def register(
     user = await create_user(session, body.email, body.password)
 
     # Every user always belongs to at least one organization — there is
-    # no such thing as a signup without a tenant in this style.
-    org_name = body.organization_name or f"{body.email.split('@')[0]}'s workspace"
+    # no such thing as a signup without a tenant in this style. The
+    # default name must never be derived from the email address: that
+    # local part becomes visible to anyone later invited to the org.
+    org_name = body.organization_name or "My workspace"
     organization = await create_organization(session, name=org_name)
     await add_member(session, organization_id=organization.id, user_id=user.id)
 

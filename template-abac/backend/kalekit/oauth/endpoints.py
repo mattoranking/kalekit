@@ -116,7 +116,7 @@ async def oauth_callback(
         )
 
     # Normalize provider-specific fields
-    account_id, account_email = _extract_user_info(provider, user_info)
+    account_id, account_email, display_name = _extract_user_info(provider, user_info)
 
     # --- Find or create local user ---
     user = await find_or_create_oauth_user(
@@ -126,6 +126,7 @@ async def oauth_callback(
         account_email=account_email,
         access_token=provider_access_token,
         refresh_token=provider_refresh_token,
+        display_name=display_name,
     )
 
     # --- Issue our JWT pair ---
@@ -139,22 +140,37 @@ async def oauth_callback(
     }
 
 
-def _extract_user_info(provider: str, user_info: dict) -> tuple[str, str | None]:
-    """Normalize the user ID and email from provider-specific JSON.
+def _extract_user_info(
+    provider: str, user_info: dict
+) -> tuple[str, str | None, str | None]:
+    """Normalize the user ID, email, and display name from provider JSON.
 
     Each provider returns a different shape:
-    - GitHub:  {"id": 12345, "email": "...", ...}
-    - Google:  {"id": "abc", "email": "...", ...}
-    - Twitter: {"data": {"id": "123", "username": "...", ...}}
+    - GitHub:  {"id": 12345, "email": "...", "name": "...", "login": "...", ...}
+    - Google:  {"id": "abc", "email": "...", "name": "...", ...}
+    - Twitter: {"data": {"id": "123", "username": "...", "name": "...", ...}}
+
+    The display name is used only to name a brand-new user's default
+    organization (e.g. "Jane's workspace") instead of deriving it from
+    the email address, which would leak the email's local part.
     """
     if provider == "github":
-        return str(user_info["id"]), user_info.get("email")
+        return (
+            str(user_info["id"]),
+            user_info.get("email"),
+            user_info.get("name") or user_info.get("login"),
+        )
 
     if provider == "google":
-        return str(user_info["id"]), user_info.get("email")
+        return str(user_info["id"]), user_info.get("email"), user_info.get("name")
 
     if provider == "twitter":
         data = user_info.get("data", {})
-        return str(data["id"]), None  # Twitter doesn't expose email by default
+        # Twitter doesn't expose email by default
+        return (
+            str(data["id"]),
+            None,
+            data.get("name") or data.get("username"),
+        )
 
     raise ValueError(f"Unknown provider: {provider}")
