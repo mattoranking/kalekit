@@ -47,6 +47,17 @@ async def add_member(
     return member, True
 
 
+async def list_user_organizations(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> list[Organization]:
+    result = await session.execute(
+        select(Organization)
+        .join(OrganizationMember, OrganizationMember.organization_id == Organization.id)
+        .where(OrganizationMember.user_id == user_id)
+    )
+    return list(result.scalars().all())
+
+
 async def list_members(
     session: AsyncSession, *, organization_id: uuid.UUID
 ) -> list[tuple[uuid.UUID, str]]:

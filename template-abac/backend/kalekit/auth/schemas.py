@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr
 
+from kalekit.organization.schemas import OrganizationResponse
+
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -30,6 +32,6 @@ class UserResponse(BaseModel):
     email: str
     is_active: bool
     created_at: datetime
-    organizations: list[str] = []
+    organizations: list[OrganizationResponse] = []
 
     model_config = {"from_attributes": True}
