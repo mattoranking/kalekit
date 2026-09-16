@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
@@ -66,6 +67,19 @@ async def require_org_member(
     return user
 
 
+@dataclass(frozen=True)
+class OrgActor:
+    """The caller plus the role they hold in the org being acted on.
+
+    Returned by `require_org_role` so endpoints can make further,
+    role-sensitive decisions (e.g. "can I grant the role I was asked to
+    grant?") without a second membership query.
+    """
+
+    user: User
+    role: MemberRole
+
+
 def require_org_role(minimum: MemberRole):
     """Dependency factory: ownership gate, then a minimum role within it.
 
@@ -77,7 +91,7 @@ def require_org_role(minimum: MemberRole):
         organization_id: UUID,
         user: Annotated[User, Depends(get_current_user)],
         session: Annotated[AsyncSession, Depends(get_db_session)],
-    ) -> User:
+    ) -> OrgActor:
         membership = await _get_membership(session, organization_id, user.id)
         if membership is None:
             raise HTTPException(status_code=404, detail="Not found")
@@ -86,6 +100,6 @@ def require_org_role(minimum: MemberRole):
                 status_code=403,
                 detail=f"Requires {minimum.value} role or higher",
             )
-        return user
+        return OrgActor(user=user, role=membership.role)
 
     return checker
