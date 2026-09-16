@@ -7,7 +7,7 @@ async def test_list_my_organizations_reports_role(
 ) -> None:
     """GET /organizations returns the caller's own memberships with the
     role held in each -- for UX only, the API remains the authority via
-    require_org_role/require_org_permission."""
+    require_org_permission."""
     register_response = await register("alice@example.com")
     registered_org = register_response.json()["organizations"][0]
     token = await login("alice@example.com")

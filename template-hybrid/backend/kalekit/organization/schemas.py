@@ -17,7 +17,7 @@ class OrganizationMembershipResponse(BaseModel):
 
     UX only -- clients use this to show/hide controls (e.g. "delete",
     "invite"), but the API remains the authority on what a role can
-    actually do (see `require_org_role` / `require_org_permission`).
+    actually do (see `require_org_permission`).
     """
 
     id: uuid.UUID
