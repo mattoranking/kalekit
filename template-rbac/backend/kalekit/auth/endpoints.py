@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import get_current_jti, get_current_user
@@ -72,10 +71,12 @@ async def register(
     # OAuth account-linking trust the email later (see oauth/repository.py).
     user = await create_user(session, body.email, body.password, email_verified=False)
 
-    visitor_role, admin_role = await ensure_default_roles(session)
-    user_count = (await session.execute(select(func.count(User.id)))).scalar_one()
-    assigned_role = admin_role if user_count == 1 else visitor_role
-    await assign_role(session, user, assigned_role)
+    # Every self-signup gets the default role -- there is no first-user
+    # admin rule. Promoting an admin is a deliberate, out-of-band act via
+    # `python -m kalekit.cli create-admin` (see kalekit/cli.py), not an
+    # accident of registration order.
+    visitor_role, _ = await ensure_default_roles(session)
+    await assign_role(session, user, visitor_role)
 
     await _issue_and_send_verification_token(session, user)
 
@@ -85,7 +86,7 @@ async def register(
         is_active=user.is_active,
         email_verified=user.email_verified,
         created_at=user.created_at,
-        roles=[assigned_role.name],
+        roles=[visitor_role.name],
     )
 
 
