@@ -122,12 +122,82 @@ async def test_refresh_token_used_after_logout_returns_401(
     access_token, refresh_token = await _login_pair(client, "logout@example.com")
 
     logout_response = await client.post(
-        "/v1/auth/logout", headers=auth_header(access_token)
+        "/v1/auth/logout",
+        headers=auth_header(access_token),
+        json={"refresh_token": refresh_token},
     )
     assert logout_response.status_code == 204
 
     response = await _refresh(client, refresh_token)
     assert response.status_code == 401
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_logout_does_not_revoke_other_sessions(
+    client: AsyncClient, auth_header
+) -> None:
+    """Logging out on one device/client must not knock out a refresh
+    token that belongs to a different session for the same user."""
+    email = "multi-device@example.com"
+    access_token_a, refresh_token_a = await _login_pair(client, email)
+    login_b = await client.post(
+        "/v1/auth/login", json={"email": email, "password": "password123"}
+    )
+    assert login_b.status_code == 200
+    access_token_b = login_b.json()["access_token"]
+    refresh_token_b = login_b.json()["refresh_token"]
+
+    logout_response = await client.post(
+        "/v1/auth/logout",
+        headers=auth_header(access_token_a),
+        json={"refresh_token": refresh_token_a},
+    )
+    assert logout_response.status_code == 204
+
+    # Session A's refresh token is dead...
+    response_a = await _refresh(client, refresh_token_a)
+    assert response_a.status_code == 401
+
+    # ...but session B's is untouched.
+    response_b = await _refresh(client, refresh_token_b)
+    assert response_b.status_code == 200
+
+    # And session B's access token still works too.
+    response = await client.get(
+        "/v1/chat/", headers=auth_header(access_token_b)
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_logout_all_revokes_every_session(
+    client: AsyncClient, auth_header
+) -> None:
+    """POST /auth/logout-all ends every session for the user, unlike
+    plain logout which only ends the current one."""
+    email = "logout-all@example.com"
+    access_token_a, refresh_token_a = await _login_pair(client, email)
+    login_b = await client.post(
+        "/v1/auth/login", json={"email": email, "password": "password123"}
+    )
+    assert login_b.status_code == 200
+    access_token_b = login_b.json()["access_token"]
+    refresh_token_b = login_b.json()["refresh_token"]
+
+    logout_all_response = await client.post(
+        "/v1/auth/logout-all", headers=auth_header(access_token_a)
+    )
+    assert logout_all_response.status_code == 204
+
+    # Both sessions' refresh tokens are dead...
+    assert (await _refresh(client, refresh_token_a)).status_code == 401
+    assert (await _refresh(client, refresh_token_b)).status_code == 401
+
+    # ...and both sessions' access tokens are blocked immediately, not
+    # just the one used to call logout-all.
+    response_a = await client.get("/v1/chat/", headers=auth_header(access_token_a))
+    assert response_a.status_code == 401
+    response_b = await client.get("/v1/chat/", headers=auth_header(access_token_b))
+    assert response_b.status_code == 401
 
 
 @pytest.mark.asyncio(loop_scope="session")

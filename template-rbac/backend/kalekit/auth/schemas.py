@@ -24,6 +24,16 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    # Required: without it, logout can only block the access token and
+    # has no way to know which session's refresh token to revoke,
+    # leaving it able to mint fresh access tokens until it expires on
+    # its own -- that's not "ending the session". A well-behaved
+    # client always has this (it was returned at login alongside the
+    # access token). See /auth/logout-all to end every session at once.
+    refresh_token: str
+
+
 class VerifyEmailRequest(BaseModel):
     token: str
 

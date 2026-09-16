@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import get_current_jti, get_current_user
 from kalekit.auth.permissions import (
+    block_all_user_tokens,
     block_token,
     cache_refresh_grace_pair,
     get_cached_refresh_grace_pair,
@@ -28,6 +29,7 @@ from kalekit.auth.repository import (
 )
 from kalekit.auth.schemas import (
     LoginRequest,
+    LogoutRequest,
     MessageResponse,
     RefreshRequest,
     RegisterRequest,
@@ -220,11 +222,39 @@ async def logout(
     user: Annotated[User, Depends(get_current_user)],
     jti: Annotated[str | None, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    body: LogoutRequest,
 ):
-    await revoke_user_refresh_tokens(session, user.id)
+    # Only the family tied to *this* session's refresh token is
+    # revoked -- not every refresh token the user holds. Web, mobile,
+    # and any other signed-in device/tab share one users table, so
+    # revoking all of them here would log the user out everywhere
+    # just because one client logged out. Use /auth/logout-all for
+    # that.
+    token_hash = hash_refresh_token(body.refresh_token)
+    token_row = await get_refresh_token_by_hash(session, token_hash)
+    if token_row is not None and token_row.user_id == user.id:
+        await revoke_refresh_token_family(session, token_row.family_id)
+
     # Without this, the access token used to call /logout stays valid
     # for the rest of its natural lifetime -- logging out wouldn't
     # actually revoke the thing that grants access.
+    if jti:
+        await block_token(jti)
+
+
+@router.post("/logout-all", status_code=204)
+async def logout_all(
+    user: Annotated[User, Depends(get_current_user)],
+    jti: Annotated[str | None, Depends(get_current_jti)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """End every session for this user, on every client/device."""
+    await revoke_user_refresh_tokens(session, user.id)
+    # Blanket-block every access token this user currently holds, not
+    # just the one used to call this endpoint -- otherwise another
+    # device's still-valid access token would keep working until it
+    # naturally expires, even though its refresh token is now dead.
+    await block_all_user_tokens(str(user.id))
     if jti:
         await block_token(jti)
 
