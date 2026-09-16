@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.roles import role_at_least
+from kalekit.auth.roles import role_at_least, role_has_permission
 from kalekit.config import settings
 from kalekit.models.organization import MemberRole, OrganizationMember
 from kalekit.models.user import User
@@ -80,8 +80,43 @@ class OrgActor:
     role: MemberRole
 
 
+def require_org_permission(permission: str):
+    """Dependency factory: ownership gate, then a permission within it.
+
+    This is the preferred gate for endpoints — it checks "can this role do
+    X?" against the `ROLE_PERMISSIONS` mapping in `auth/roles.py` rather
+    than "is this role at least Y?", so endpoints declare what they need
+    instead of encoding a rank ordering that breaks for non-linear roles.
+
+    This never grants access on its own — it only narrows a caller who
+    already passed the membership check.
+    """
+
+    async def checker(
+        organization_id: UUID,
+        user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[AsyncSession, Depends(get_db_session)],
+    ) -> OrgActor:
+        membership = await _get_membership(session, organization_id, user.id)
+        if membership is None:
+            raise HTTPException(status_code=404, detail="Not found")
+        if not role_has_permission(membership.role, permission):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Requires the '{permission}' permission",
+            )
+        return OrgActor(user=user, role=membership.role)
+
+    return checker
+
+
 def require_org_role(minimum: MemberRole):
     """Dependency factory: ownership gate, then a minimum role within it.
+
+    Kept as a thin wrapper over rank comparison for backwards
+    compatibility (and for the rare case where "at least this rank" really
+    is the right check). Prefer `require_org_permission` for new endpoints
+    — see its docstring.
 
     This never grants access on its own — it only narrows a caller who
     already passed the membership check.

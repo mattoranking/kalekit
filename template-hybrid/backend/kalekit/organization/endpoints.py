@@ -4,7 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import OrgActor, require_org_member, require_org_role
+from kalekit.auth.dependencies import (
+    OrgActor,
+    require_org_member,
+    require_org_permission,
+)
 from kalekit.auth.repository import find_user_by_email
 from kalekit.auth.roles import role_at_least
 from kalekit.models.organization import MemberRole
@@ -41,7 +45,7 @@ async def add_organization_member(
     organization_id: UUID,
     body: AddMemberRequest,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    caller: Annotated[OrgActor, Depends(require_org_role(MemberRole.admin))],
+    caller: Annotated[OrgActor, Depends(require_org_permission("members:invite"))],
 ) -> MemberResponse:
     """Only admin/owner can invite — and only up to the role they hold.
 
