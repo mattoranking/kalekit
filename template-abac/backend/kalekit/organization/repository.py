@@ -1,6 +1,7 @@
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import Organization, OrganizationMember
@@ -35,6 +36,11 @@ async def add_member(
     Returns the membership row and whether it was newly created. If the
     user is already a member, the existing row is returned instead of
     inserting a duplicate (organization_id, user_id) pair.
+
+    Check-then-insert, with the DB-level `UniqueConstraint` on
+    (organization_id, user_id) as the real guard against two concurrent
+    invites racing past the initial check -- the `IntegrityError`
+    fallback below is what makes the race safe, not the check itself.
     """
     existing = await get_member(
         session, organization_id=organization_id, user_id=user_id
@@ -44,7 +50,19 @@ async def add_member(
 
     member = OrganizationMember(organization_id=organization_id, user_id=user_id)
     session.add(member)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        existing = await get_member(
+            session, organization_id=organization_id, user_id=user_id
+        )
+        if existing is None:
+            # Not the uniqueness violation we expected -- e.g. a stale
+            # organization_id/user_id hitting a FK constraint. Re-raise
+            # the original error rather than masking it.
+            raise
+        return existing, False
     return member, True
 
 
