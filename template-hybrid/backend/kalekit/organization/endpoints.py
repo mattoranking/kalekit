@@ -11,8 +11,7 @@ from kalekit.auth.dependencies import (
     require_org_permission,
 )
 from kalekit.auth.repository import find_user_by_email
-from kalekit.auth.roles import role_at_least
-from kalekit.models.organization import MemberRole
+from kalekit.auth.roles import role_has_permission
 from kalekit.models.user import User
 from kalekit.organization.repository import add_member, list_members
 from kalekit.organization.schemas import (
@@ -40,7 +39,7 @@ async def list_my_organizations(
 
     UX only -- for deciding what to show (e.g. "delete", "invite",
     settings controls), not authorization. The API remains the
-    authority via `require_org_role` / `require_org_permission`.
+    authority via `require_org_permission`.
     """
     return OrganizationListResponse(
         items=[
@@ -75,20 +74,16 @@ async def add_organization_member(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     caller: Annotated[OrgActor, Depends(require_org_permission("members:invite"))],
 ) -> MemberResponse:
-    """Only admin/owner can invite — and only up to the role they hold.
+    """Only admin/owner can invite — and only at a role they're permitted
+    to grant (see `members:grant:<role>` in `auth/roles.py::ROLE_PERMISSIONS`).
 
-    Granting `owner` additionally requires the caller themselves be
-    `owner` — an admin can invite admin/member/viewer, never owner.
+    Only an owner can grant the owner role — an admin can invite
+    admin/member/viewer, never owner.
     """
-    if not role_at_least(caller.role, body.role):
+    if not role_has_permission(caller.role, f"members:grant:{body.role.value}"):
         raise HTTPException(
             status_code=403,
             detail="Cannot grant a role higher than your own",
-        )
-    if body.role == MemberRole.owner and caller.role != MemberRole.owner:
-        raise HTTPException(
-            status_code=403,
-            detail="Only an owner can grant the owner role",
         )
     user = await find_user_by_email(session, body.email)
     if user is None:

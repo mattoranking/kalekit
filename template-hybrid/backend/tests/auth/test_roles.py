@@ -34,3 +34,19 @@ def test_owner_has_every_permission_every_other_role_has() -> None:
 def test_unknown_permission_is_denied_for_every_role() -> None:
     for role in MemberRole:
         assert not role_has_permission(role, "org:nuke-from-orbit")
+
+
+def test_grant_permissions_follow_who_can_invite_at_that_role() -> None:
+    """Grant-eligibility is a capability (`members:grant:<role>`) in
+    ROLE_PERMISSIONS, not a rank comparison -- see
+    `organization/endpoints.py::add_organization_member`."""
+    for role in (MemberRole.viewer, MemberRole.member):
+        for grantable in MemberRole:
+            assert not role_has_permission(role, f"members:grant:{grantable.value}")
+
+    for grantable in (MemberRole.viewer, MemberRole.member, MemberRole.admin):
+        assert role_has_permission(MemberRole.admin, f"members:grant:{grantable.value}")
+    assert not role_has_permission(MemberRole.admin, "members:grant:owner")
+
+    for grantable in MemberRole:
+        assert role_has_permission(MemberRole.owner, f"members:grant:{grantable.value}")
