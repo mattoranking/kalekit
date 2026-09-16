@@ -24,10 +24,19 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class MessageResponse(BaseModel):
+    detail: str
+
+
 class UserResponse(BaseModel):
     id: uuid.UUID
     email: str
     is_active: bool
+    email_verified: bool
     created_at: datetime
     roles: list[str] = []
 

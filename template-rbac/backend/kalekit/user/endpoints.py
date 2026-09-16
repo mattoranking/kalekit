@@ -30,6 +30,7 @@ async def list_users(
                 id=u.id,
                 email=u.email,
                 is_active=u.is_active,
+                email_verified=u.email_verified,
                 created_at=u.created_at,
                 roles=[ur.role.name for ur in u.roles],
             )

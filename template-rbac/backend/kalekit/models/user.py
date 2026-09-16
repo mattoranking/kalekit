@@ -21,6 +21,15 @@ class User(RecordModel):
     )
     password_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Password sign-ups start unverified and must click an emailed link.
+    # OAuth-created users are only marked verified when the provider
+    # itself reports the email as verified (see oauth/repository.py) --
+    # this flag is what account-linking trusts to prevent a pre-hijack
+    # (attacker registers victim@example.com first, then the real owner
+    # signs in with an OAuth provider using that address).
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
 
     # Relationships
     roles: Mapped[list["UserRole"]] = relationship(

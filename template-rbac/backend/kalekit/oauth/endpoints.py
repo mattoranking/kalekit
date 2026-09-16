@@ -11,6 +11,7 @@ with a short TTL to prevent CSRF and replay attacks.
 import secrets
 from typing import Annotated
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +23,7 @@ from kalekit.auth.service import (
     hash_refresh_token,
 )
 from kalekit.oauth.client import OAUTH_PROVIDERS
-from kalekit.oauth.repository import find_or_create_oauth_user
+from kalekit.oauth.repository import OAuthAccountLinkingError, find_or_create_oauth_user
 from kalekit.postgres import get_db_session
 
 router = APIRouter(prefix="/oauth", tags=["oauth"])
@@ -122,16 +123,23 @@ async def oauth_callback(
 
     # Normalize provider-specific fields
     account_id, account_email = _extract_user_info(provider, user_info)
+    provider_email_verified = await _get_provider_email_verified(
+        provider, user_info, provider_access_token, account_email
+    )
 
     # --- Find or create local user ---
-    user = await find_or_create_oauth_user(
-        session,
-        platform=provider,
-        account_id=account_id,
-        account_email=account_email,
-        access_token=provider_access_token,
-        refresh_token=provider_refresh_token,
-    )
+    try:
+        user = await find_or_create_oauth_user(
+            session,
+            platform=provider,
+            account_id=account_id,
+            account_email=account_email,
+            access_token=provider_access_token,
+            refresh_token=provider_refresh_token,
+            provider_email_verified=provider_email_verified,
+        )
+    except OAuthAccountLinkingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
     # --- Issue our token pair ---
     roles = [ur.role.name for ur in user.roles]
@@ -175,3 +183,54 @@ def _extract_user_info(provider: str, user_info: dict) -> tuple[str, str | None]
         return str(data["id"]), None  # Twitter doesn't expose email by default
 
     raise ValueError(f"Unknown provider: {provider}")
+
+
+async def _get_provider_email_verified(
+    provider: str,
+    user_info: dict,
+    access_token: str,
+    account_email: str | None,
+) -> bool:
+    """Does the IdP itself vouch that `account_email` is verified?
+
+    This is what find_or_create_oauth_user uses to decide whether it's
+    safe to auto-link an OAuth sign-in to an existing password account
+    (see the docstring there for the attack this guards against) --
+    linking on an email the provider hasn't confirmed would just move
+    the account-pre-hijack hole from "unverified" to "provider says
+    so", so each provider is handled explicitly rather than assumed
+    verified by default.
+    """
+    if not account_email:
+        return False
+
+    if provider == "google":
+        # Google's userinfo response includes this directly.
+        return bool(user_info.get("verified_email", False))
+
+    if provider == "github":
+        # GitHub's /user endpoint doesn't carry verification status for
+        # the profile email, so ask /user/emails (covered by the
+        # `user:email` scope we request) and check the matching entry.
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://api.github.com/user/emails",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                    },
+                )
+                response.raise_for_status()
+                emails = response.json()
+        except Exception:
+            return False
+        return any(
+            e.get("email") == account_email and e.get("verified")
+            for e in emails
+        )
+
+    # Twitter never returns an email in the first place, so
+    # account_email is always None here already; any future provider
+    # we haven't explicitly vetted defaults to unverified.
+    return False
