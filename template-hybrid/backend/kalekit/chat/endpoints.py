@@ -4,7 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import OrgActor, require_org_member, require_org_role
+from kalekit.auth.dependencies import (
+    OrgActor,
+    require_org_member,
+    require_org_permission,
+)
 from kalekit.chat.repository import (
     create_message,
     delete_message,
@@ -16,7 +20,6 @@ from kalekit.chat.schemas import (
     ChatMessageListResponse,
     ChatMessageResponse,
 )
-from kalekit.models.organization import MemberRole
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 
@@ -42,9 +45,9 @@ async def post_message(
     organization_id: UUID,
     body: ChatMessageCreate,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    caller: Annotated[OrgActor, Depends(require_org_role(MemberRole.member))],
+    caller: Annotated[OrgActor, Depends(require_org_permission("chat:write"))],
 ) -> ChatMessageResponse:
-    """Posting needs at least `member` — a `viewer` is refused."""
+    """Posting needs `chat:write` — a `viewer` is refused."""
     message = await create_message(
         session,
         organization_id=organization_id,
@@ -59,9 +62,9 @@ async def delete_message_endpoint(
     organization_id: UUID,
     message_id: UUID,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    _caller: Annotated[OrgActor, Depends(require_org_role(MemberRole.admin))],
+    _caller: Annotated[OrgActor, Depends(require_org_permission("chat:delete"))],
 ) -> None:
-    """Deleting needs at least `admin` — a `member` is refused."""
+    """Deleting needs `chat:delete` — a `member` is refused."""
     message = await get_message(
         session, organization_id=organization_id, message_id=message_id
     )
