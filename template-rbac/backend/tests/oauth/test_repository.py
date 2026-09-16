@@ -5,9 +5,13 @@ from kalekit.oauth.repository import find_or_create_oauth_user
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_first_oauth_user_becomes_admin(session: AsyncSession) -> None:
+async def test_first_oauth_user_becomes_visitor_not_admin(
+    session: AsyncSession,
+) -> None:
     """Same rule as password /auth/register -- a user whose only signup
-    path is OAuth must not end up with zero roles."""
+    path is OAuth must not end up with zero roles, but also must not be
+    auto-promoted to admin just for being first. Admin is only granted via
+    `python -m kalekit.cli create-admin`."""
     user = await find_or_create_oauth_user(
         session,
         platform="github",
@@ -17,7 +21,7 @@ async def test_first_oauth_user_becomes_admin(session: AsyncSession) -> None:
     )
 
     roles = [ur.role.name for ur in user.roles]
-    assert roles == ["admin"]
+    assert roles == ["visitor"]
 
 
 @pytest.mark.asyncio(loop_scope="session")

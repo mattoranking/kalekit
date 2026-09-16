@@ -4,11 +4,12 @@ from httpx import AsyncClient
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_logout_revokes_the_access_token_immediately(
-    client: AsyncClient, register, auth_header
+    client: AsyncClient, register, auth_header, promote_to_admin
 ) -> None:
     """A token's natural expiry (ACCESS_TOKEN_EXPIRE_MINUTES) is minutes
     away -- logout has to invalidate it right now, not eventually."""
     await register("admin@example.com")
+    await promote_to_admin("admin@example.com")
     login_response = await client.post(
         "/v1/auth/login",
         json={"email": "admin@example.com", "password": "password123"},

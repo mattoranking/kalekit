@@ -133,12 +133,17 @@ async def test_refresh_token_used_after_logout_returns_401(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_logout_does_not_revoke_other_sessions(
-    client: AsyncClient, auth_header
+    client: AsyncClient, auth_header, promote_to_admin
 ) -> None:
     """Logging out on one device/client must not knock out a refresh
     token that belongs to a different session for the same user."""
     email = "multi-device@example.com"
     access_token_a, refresh_token_a = await _login_pair(client, email)
+    # /v1/chat/ is used below as a stand-in "protected route" to prove the
+    # access token still works -- it requires the admin-only posts:read
+    # permission, so this session's user needs the role explicitly since
+    # there's no first-user-becomes-admin shortcut anymore.
+    await promote_to_admin(email)
     login_b = await client.post(
         "/v1/auth/login", json={"email": email, "password": "password123"}
     )

@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from kalekit.auth.repository import find_user_by_email
+from kalekit.auth.seed import assign_role, ensure_default_roles
 from kalekit.config import settings
 from kalekit.models import Model  # noqa: F401 -- registers all models
 
@@ -127,6 +129,27 @@ async def login(client: AsyncClient) -> Callable[..., Coroutine[None, None, str]
         return response.json()["access_token"]
 
     return _login
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def promote_to_admin(
+    session: AsyncSession,
+) -> Callable[[str], Coroutine[None, None, None]]:
+    """promote_to_admin(email) -- grant the admin role to an already
+    registered user, inside the same test transaction.
+
+    There is no first-user-becomes-admin shortcut anymore (see
+    kalekit/cli.py, the real out-of-band way to mint an admin) so tests
+    that need an admin user have to grant the role explicitly.
+    """
+
+    async def _promote_to_admin(email: str) -> None:
+        user = await find_user_by_email(session, email)
+        assert user is not None, f"no user registered with email {email!r}"
+        _, admin_role = await ensure_default_roles(session)
+        await assign_role(session, user, admin_role)
+
+    return _promote_to_admin
 
 
 @pytest.fixture

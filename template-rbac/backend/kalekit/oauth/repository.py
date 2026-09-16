@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import find_user_by_email
@@ -106,10 +106,10 @@ async def find_or_create_oauth_user(
         # Same role-assignment rule as password /auth/register -- without
         # this, a user whose only signup path was OAuth ends up with no
         # roles at all, and require_permission rejects them everywhere.
-        visitor_role, admin_role = await ensure_default_roles(session)
-        user_count = (await session.execute(select(func.count(User.id)))).scalar_one()
-        assigned_role = admin_role if user_count == 1 else visitor_role
-        await assign_role(session, user, assigned_role)
+        # No first-user-becomes-admin shortcut here either: OAuth signups
+        # always get the default role, same as password signups.
+        visitor_role, _ = await ensure_default_roles(session)
+        await assign_role(session, user, visitor_role)
 
         # `user` was constructed in-memory, not loaded via a SELECT, so
         # selectin eager-loading never ran for it -- an unrefreshed

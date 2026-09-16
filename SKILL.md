@@ -105,6 +105,10 @@ the generator's own `rbac` default only exists for scripting/back-compat.
 
 ## After generation — tell the user
 
+- `rbac` template: no signup path (password or OAuth) grants the `admin`
+  role -- everyone starts as `visitor`. Create the first admin with:
+  `uv run python -m kalekit.cli create-admin --email you@example.com --password '...'`
+  (run from `backend/`; see `backend/README.md`).
 - Edit `CLAUDE.md` — the domain sections are stubs (`What this is`, `Domain
   language`, the state machine). The architecture and load-bearing rules are filled in.
 - `apps/*` domains are placeholders (`<name>.dev` local, `<name>.one` in the OpenAPI
