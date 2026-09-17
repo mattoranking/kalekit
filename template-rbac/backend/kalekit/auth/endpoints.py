@@ -18,6 +18,7 @@ from kalekit.auth.permissions import (
     block_token,
     cache_refresh_grace_pair,
     get_cached_refresh_grace_pair,
+    get_redis,
     get_scopes_for_roles,
 )
 from kalekit.auth.repository import (
@@ -68,6 +69,11 @@ from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.utils.email import send_verification_email
+from kalekit.utils.rate_limit import (
+    bounded_identifier,
+    check_and_increment,
+    get_client_ip,
+)
 
 router = APIRouter(
     prefix="/auth",
@@ -75,11 +81,37 @@ router = APIRouter(
 )
 
 
+def _rate_limited(retry_after_seconds: int) -> HTTPException:
+    """A 429 carrying `Retry-After`, per issue #18's acceptance
+    criteria. `retry_after_seconds` should come from the tripped key's
+    Redis TTL; guarded to at least 1 since a key can (rarely) read back
+    a TTL of 0 or -1 right at expiry/recovery."""
+    retry_after = max(retry_after_seconds, 1)
+    return HTTPException(
+        status_code=429,
+        detail="Too many requests, try again later",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 @router.post("/register", response_model=UserResponse, status_code=201)
 async def register(
     body: RegisterRequest,
+    request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
+    if settings.RATE_LIMIT_ENABLED:
+        r = await get_redis()
+        ip_key = f"register_rate:ip:{get_client_ip(request)}"
+        allowed = await check_and_increment(
+            r,
+            ip_key,
+            limit=settings.REGISTER_RATE_LIMIT_PER_IP,
+            window_seconds=settings.REGISTER_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            raise _rate_limited(await r.ttl(ip_key))
+
     existing = await find_user_by_email(session, body.email)
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
@@ -142,6 +174,47 @@ async def login(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
+    r = None
+    # Keyed on the submitted email, lowercased -- not on the resolved
+    # user id -- so an unknown email is throttled exactly like a real
+    # one; otherwise this limit itself becomes an account-enumeration
+    # oracle. (find_user_by_email itself does an exact, non-lowercased
+    # match -- this app doesn't normalize email casing anywhere else --
+    # so the lowercasing here is purely to keep this counter from being
+    # split across multiple keys by a caller who varies casing between
+    # requests targeting the same account.)
+    account_key = f"login_rate:account:{bounded_identifier(body.email.lower())}"
+    if settings.RATE_LIMIT_ENABLED:
+        r = await get_redis()
+        ip_key = f"login_rate:ip:{get_client_ip(request)}"
+        ip_allowed = await check_and_increment(
+            r,
+            ip_key,
+            limit=settings.LOGIN_RATE_LIMIT_PER_IP,
+            window_seconds=settings.LOGIN_RATE_LIMIT_IP_WINDOW_SECONDS,
+        )
+        if not ip_allowed:
+            raise _rate_limited(await r.ttl(ip_key))
+
+        # Peek (don't increment) the account's failure count -- only an
+        # actual failed attempt below should consume this budget, so a
+        # request that goes on to succeed must not have already spent
+        # a unit of it just by arriving.
+        current_failures = await r.get(account_key)
+        if current_failures:
+            account_ttl = await r.ttl(account_key)
+            if account_ttl == -1:
+                # Same TTL-recovery this key would otherwise only get
+                # from check_and_increment (see utils/rate_limit.py) --
+                # but this peek path never calls that, so without this
+                # a key that lost its expiry (e.g. a crash between a
+                # prior INCR and its EXPIRE) would block this account
+                # forever instead of resetting after the window.
+                account_ttl = settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                await r.expire(account_key, account_ttl)
+            if int(current_failures) >= settings.LOGIN_RATE_LIMIT_PER_ACCOUNT:
+                raise _rate_limited(account_ttl)
+
     user = await find_user_by_email(session, body.email)
 
     # Always run a hash verification, even when the email doesn't exist,
@@ -155,11 +228,25 @@ async def login(
     )
 
     if not user or not password_valid:
+        if r is not None:
+            await check_and_increment(
+                r,
+                account_key,
+                limit=settings.LOGIN_RATE_LIMIT_PER_ACCOUNT,
+                window_seconds=settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
+            )
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
     if settings.REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN and not user.email_verified:
         raise HTTPException(status_code=403, detail="Email verification required")
+
+    if r is not None:
+        # A successful login clears any accumulated failure count for
+        # this account -- the threshold is meant to slow down guessing,
+        # not to keep locking out someone who's now proven they have
+        # the right password.
+        await r.delete(account_key)
 
     # Transparently move a legacy (pre-pwdlib) bcrypt hash onto Argon2
     # now that we know the plaintext password -- no forced reset needed.
@@ -211,6 +298,23 @@ async def refresh(
 
     if token_row is None:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    if settings.RATE_LIMIT_ENABLED:
+        # Keyed per session (the refresh token family), not per IP -- a
+        # session legitimately moves across IPs (mobile networks, VPNs),
+        # and the presented token is already the unguessable secret.
+        # This just caps how fast one session can spin through
+        # refreshes, e.g. a buggy client stuck in a retry loop.
+        r = await get_redis()
+        session_key = f"refresh_rate:session:{token_row.family_id}"
+        session_allowed = await check_and_increment(
+            r,
+            session_key,
+            limit=settings.REFRESH_RATE_LIMIT_PER_SESSION,
+            window_seconds=settings.REFRESH_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not session_allowed:
+            raise _rate_limited(await r.ttl(session_key))
 
     now = datetime.now(timezone.utc)
 
@@ -517,6 +621,21 @@ async def resend_verification(
 ):
     if user.email_verified:
         return MessageResponse(detail="Email already verified")
+
+    if settings.RATE_LIMIT_ENABLED:
+        # Per user, not per IP -- this is authenticated, and the thing
+        # being protected is the mailbox getting flooded, not the
+        # endpoint's throughput.
+        r = await get_redis()
+        user_key = f"resend_verification_rate:user:{user.id}"
+        allowed = await check_and_increment(
+            r,
+            user_key,
+            limit=settings.RESEND_VERIFICATION_RATE_LIMIT_PER_USER,
+            window_seconds=settings.RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            raise _rate_limited(await r.ttl(user_key))
 
     # Reachable while unverified even when REQUIRE_EMAIL_VERIFICATION_
     # BEFORE_LOGIN is off, and it's the escape hatch for the case where
