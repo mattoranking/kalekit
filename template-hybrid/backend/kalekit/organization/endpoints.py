@@ -17,6 +17,7 @@ from kalekit.models.organization import Organization
 from kalekit.models.user import User
 from kalekit.organization.repository import (
     LastOwnerError,
+    NotPermittedError,
     add_member,
     change_member_role,
     create_invitation,
@@ -114,32 +115,34 @@ async def change_organization_member_role(
     `members:grant:owner`, so only an owner can touch another owner,
     including demoting them).
 
+    That authorization check is done *inside* `change_member_role`,
+    against the target's role as re-read under the organization row's
+    lock -- not against an earlier, unlocked fetch here. Checking here
+    instead would open a real privilege-escalation race: the caller
+    could be authorized against a target who was e.g. `member` at
+    check time, then have a concurrent request promote that same
+    target to `owner` before this request's mutation actually runs,
+    letting an admin who was never authorized to touch an owner act on
+    one anyway. See `change_member_role`'s and `NotPermittedError`'s
+    docstrings.
+
     Refuses (409) any change that would leave the organization with
     zero owners -- including an owner demoting themselves. See
     `change_member_role`'s docstring for the concurrency-safe
     last-owner check.
     """
-    target = await get_member(session, organization_id=organization_id, user_id=user_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Not found")
-
-    if not role_has_permission(caller.role, f"members:grant:{target.role.value}"):
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot act on a member with a role above your own",
-        )
-    if not role_has_permission(caller.role, f"members:grant:{body.role.value}"):
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot grant a role higher than your own",
-        )
-
     try:
         member = await change_member_role(
             session,
             organization_id=organization_id,
             user_id=user_id,
             role=body.role,
+            caller_role=caller.role,
+        )
+    except NotPermittedError:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot act on or grant a role above your own",
         )
     except LastOwnerError:
         raise HTTPException(
@@ -147,8 +150,6 @@ async def change_organization_member_role(
             detail="Cannot demote the organization's last owner",
         )
     if member is None:
-        # Unreachable in practice: `get_member` above already confirmed
-        # this membership exists.
         raise HTTPException(status_code=404, detail="Not found")
 
     # Fetched directly rather than via `member.user` -- that relationship
@@ -178,23 +179,27 @@ async def remove_organization_member(
     already satisfied, and (being an owner or admin) always passes the
     act-on check against their own current role.
 
+    That check runs inside `remove_member`, against the target's role
+    re-read under the organization row's lock rather than an earlier
+    unlocked fetch here -- see `change_organization_member_role`'s
+    docstring for why an unlocked pre-check is a real
+    privilege-escalation race, not just a theoretical concern.
+
     Refuses (409) to remove the organization's last owner -- an org
     must never reach zero owners through this API. 404 if `user_id`
     isn't currently a member.
     """
-    target = await get_member(session, organization_id=organization_id, user_id=user_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Not found")
-
-    if not role_has_permission(caller.role, f"members:grant:{target.role.value}"):
+    try:
+        member = await remove_member(
+            session,
+            organization_id=organization_id,
+            user_id=user_id,
+            caller_role=caller.role,
+        )
+    except NotPermittedError:
         raise HTTPException(
             status_code=403,
             detail="Cannot act on a member with a role above your own",
-        )
-
-    try:
-        member = await remove_member(
-            session, organization_id=organization_id, user_id=user_id
         )
     except LastOwnerError:
         raise HTTPException(
@@ -202,8 +207,6 @@ async def remove_organization_member(
             detail="Cannot remove the organization's last owner",
         )
     if member is None:
-        # Unreachable in practice: `get_member` above already confirmed
-        # this membership exists.
         raise HTTPException(status_code=404, detail="Not found")
 
 
