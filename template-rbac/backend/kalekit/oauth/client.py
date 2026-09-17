@@ -153,11 +153,12 @@ google_oauth = OAuthClient(
 # only pre-fills/suggests an account, it does not require re-entering
 # credentials). There is therefore no `reauth_params` set here: a
 # reauth=True request to GitHub falls back to the ordinary authorize
-# URL and, per Copilot's own suggested resolution on this PR, is
-# best-effort only -- if the browser still has an active GitHub
-# session, the provider may silently re-authorize without prompting
-# for credentials. This is a documented, deliberate limitation of the
-# provider, not an oversight -- see test_oauth_client.py.
+# URL and is best-effort only -- if the browser still has an active
+# GitHub session, the provider may silently re-authorize without
+# prompting for credentials. This is a documented, deliberate
+# limitation of the provider, not an oversight -- see
+# test_authorize_reauth_is_best_effort_for_github in
+# tests/oauth/test_endpoints.py.
 github_oauth = OAuthClient(
     authorize_url="https://github.com/login/oauth/authorize",
     token_url="https://github.com/login/oauth/access_token",
