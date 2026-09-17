@@ -80,3 +80,17 @@ class SessionListResponse(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    # Plain `str`, not `EmailStr` -- deliberately, same reasoning as
+    # `LoginRequest.email`: a malformed value still gets the identical
+    # uniform 202 every other request gets, instead of a 422 that would
+    # leak "this wasn't even shaped like an email" ahead of the
+    # enumeration-safe response.
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str

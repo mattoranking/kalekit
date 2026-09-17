@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +22,8 @@ from kalekit.auth.permissions import (
     get_scopes_for_roles,
 )
 from kalekit.auth.repository import (
+    claim_password_reset_token,
+    create_password_reset_token,
     create_user,
     create_verification_token,
     find_user_by_email,
@@ -29,6 +31,7 @@ from kalekit.auth.repository import (
     get_refresh_token_by_hash,
     get_refresh_token_by_id,
     get_valid_verification_token,
+    invalidate_user_password_reset_tokens,
     invalidate_user_verification_tokens,
     list_user_sessions,
     mark_refresh_token_replaced,
@@ -41,11 +44,13 @@ from kalekit.auth.repository import (
 )
 from kalekit.auth.schemas import (
     ChangePasswordRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     LogoutRequest,
     MessageResponse,
     RefreshRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     SessionListResponse,
     SessionResponse,
     TokenResponse,
@@ -61,6 +66,7 @@ from kalekit.auth.service import (
     generate_verification_token,
     hash_refresh_token,
     hash_verification_token,
+    password_reset_token_expiry,
     verification_token_expiry,
     verify_and_upgrade_password,
     verify_password,
@@ -68,7 +74,7 @@ from kalekit.auth.service import (
 from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
-from kalekit.utils.email import send_verification_email
+from kalekit.utils.email import send_password_reset_email, send_verification_email
 from kalekit.utils.rate_limit import (
     bounded_identifier,
     check_and_increment,
@@ -646,3 +652,165 @@ async def resend_verification(
     await _issue_and_send_verification_token(session, user)
 
     return MessageResponse(detail="Verification email sent")
+
+
+async def _issue_password_reset_token(session: AsyncSession, user: User) -> str:
+    """Persists a fresh reset token for `user` and returns the raw
+    (unhashed) value to email. Only touches the DB -- unlike
+    `_issue_and_send_verification_token`, sending the email is the
+    caller's job, so it can be deferred separately (see
+    `forgot_password`)."""
+    raw_token = generate_verification_token()
+    await create_password_reset_token(
+        session,
+        user_id=user.id,
+        token_hash=hash_verification_token(raw_token),
+        expires_at=password_reset_token_expiry(),
+    )
+    return raw_token
+
+
+_FORGOT_PASSWORD_RESPONSE = MessageResponse(
+    detail="If that email is registered, a password reset link has been sent"
+)
+
+
+@router.post(
+    "/password/forgot", response_model=MessageResponse, status_code=202
+)
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Always answers 202 with the same body, whether or not `email`
+    belongs to a real, active account -- see `_FORGOT_PASSWORD_RESPONSE`.
+    A response (status or body) that varied by account existence would
+    turn this endpoint into an account-enumeration oracle, exactly the
+    failure mode #17 calls out -- and so would its *timing*: a known,
+    active account does strictly more work per request than an unknown
+    or inactive one, and for a real (non-`ConsoleEmailSender`) provider
+    the dominant term in that gap is a synchronous network call to send
+    the email, not the one extra token row. That's why the email send
+    below is handed to `background_tasks` instead of being awaited
+    inline -- it runs only *after* this response has already gone out
+    to the caller, so it can't be timed by whoever's asking (round-2
+    Copilot finding on PR #93). The token itself is still written and
+    committed synchronously, through the normal request-scoped session,
+    before this endpoint returns -- deferring that too isn't safe here
+    (this session is closed out by `get_db_session`'s own teardown
+    before background tasks run, so anything needing the DB has to
+    happen inline) and isn't necessary anyway: one fast, indexed INSERT
+    is a far smaller residual timing signal than a network round trip,
+    in the same spirit as the login endpoint's DUMMY_PASSWORD_HASH --
+    substantially closing the gap, not claiming to make it disappear.
+    """
+    if settings.RATE_LIMIT_ENABLED:
+        r = await get_redis()
+        ip_key = f"password_reset_request_rate:ip:{get_client_ip(request)}"
+        ip_allowed = await check_and_increment(
+            r,
+            ip_key,
+            limit=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP,
+            window_seconds=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_IP_WINDOW_SECONDS,
+        )
+        if not ip_allowed:
+            raise _rate_limited(await r.ttl(ip_key))
+
+        # Unlike login's per-account limit (which only counts actual
+        # failures), this counts *every* request against the submitted
+        # email unconditionally -- there's no success/failure split
+        # visible to the caller here, so an unknown email must consume
+        # the same budget a real one would, or the limiter itself would
+        # leak which emails are registered.
+        account_key = (
+            f"password_reset_request_rate:account:"
+            f"{bounded_identifier(body.email.lower())}"
+        )
+        account_allowed = await check_and_increment(
+            r,
+            account_key,
+            limit=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT,
+            window_seconds=(
+                settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+            ),
+        )
+        if not account_allowed:
+            raise _rate_limited(await r.ttl(account_key))
+
+    user = await find_user_by_email(session, body.email)
+    # Deactivated accounts are silently skipped too -- same reasoning as
+    # unknown emails, since a differing response either way would leak
+    # account state through this endpoint.
+    if user is not None and user.is_active:
+        # Burn any outstanding reset link before issuing a fresh one, so
+        # an earlier emailed link stops working once a new reset is
+        # requested (mirrors resend-verification).
+        await invalidate_user_password_reset_tokens(session, user.id)
+        raw_token = await _issue_password_reset_token(session, user)
+        background_tasks.add_task(
+            send_password_reset_email, to=user.email, token=raw_token
+        )
+
+    return _FORGOT_PASSWORD_RESPONSE
+
+
+@router.post("/password/reset", response_model=MessageResponse)
+async def reset_password(
+    body: ResetPasswordRequest,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Redeems a token minted by `/auth/password/forgot`: sets the new
+    password and revokes every existing session for the account.
+
+    Sessions are revoked unconditionally, not "all but the caller's
+    own" like `/auth/change-password` -- this endpoint is unauthenticated
+    (there is no session to spare), and a password reset is presumptively
+    responding to a compromised account, so anything that logged in
+    under the old/leaked password should be signed out.
+
+    Also how an OAuth-only account (`password_hash` is null) gets a
+    password for the first time: `update_user_password` doesn't care
+    whether a hash already existed, so redeeming a reset token here
+    links password login onto the account exactly like setting one
+    normally would.
+    """
+    if settings.RATE_LIMIT_ENABLED:
+        r = await get_redis()
+        ip_key = f"password_reset_rate:ip:{get_client_ip(request)}"
+        ip_allowed = await check_and_increment(
+            r,
+            ip_key,
+            limit=settings.PASSWORD_RESET_RATE_LIMIT_PER_IP,
+            window_seconds=settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not ip_allowed:
+            raise _rate_limited(await r.ttl(ip_key))
+
+    token = await claim_password_reset_token(
+        session, hash_verification_token(body.token)
+    )
+    if token is None:
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired reset token"
+        )
+
+    user = await session.get(User, token.user_id)
+    if not user or not user.is_active:
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired reset token"
+        )
+
+    await update_user_password(session, user, body.new_password)
+
+    # Same "sign out everywhere" pair /auth/logout-all uses: revoke
+    # every refresh token family (the sessions themselves), then
+    # blanket-block every access token this user currently holds so an
+    # already-minted one doesn't keep working for the rest of its
+    # natural lifetime despite its refresh token now being dead.
+    await revoke_user_refresh_tokens(session, user.id)
+    await block_all_user_tokens(str(user.id))
+
+    return MessageResponse(detail="Password reset")

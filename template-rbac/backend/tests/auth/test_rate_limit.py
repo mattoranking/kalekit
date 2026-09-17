@@ -338,6 +338,100 @@ async def test_rate_limiting_can_be_disabled(
         assert response.status_code == 401
 
 
+@pytest.mark.asyncio(loop_scope="session")
+async def test_forgot_password_is_rate_limited_per_account(
+    client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT", 1)
+    monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP", 1000)
+
+    await register("forgot-rate-account@example.com", "password123")
+
+    first = await client.post(
+        "/v1/auth/password/forgot",
+        json={"email": "forgot-rate-account@example.com"},
+    )
+    assert first.status_code == 202
+
+    blocked = await client.post(
+        "/v1/auth/password/forgot",
+        json={"email": "forgot-rate-account@example.com"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_forgot_password_account_limit_also_applies_to_unknown_emails(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The per-account limit has to throttle unregistered emails
+    exactly like real ones -- otherwise the limiter itself would leak
+    which emails are registered (blocked = real account, never blocked
+    = unknown)."""
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT", 1)
+    monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP", 1000)
+
+    first = await client.post(
+        "/v1/auth/password/forgot",
+        json={"email": "forgot-rate-unknown@example.com"},
+    )
+    assert first.status_code == 202
+
+    blocked = await client.post(
+        "/v1/auth/password/forgot",
+        json={"email": "forgot-rate-unknown@example.com"},
+    )
+    assert blocked.status_code == 429
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_forgot_password_is_rate_limited_per_ip(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP", 1)
+    monkeypatch.setattr(
+        settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT", 1000
+    )
+
+    first = await client.post(
+        "/v1/auth/password/forgot",
+        json={"email": "forgot-rate-ip-a@example.com"},
+    )
+    assert first.status_code == 202
+
+    blocked = await client.post(
+        "/v1/auth/password/forgot",
+        json={"email": "forgot-rate-ip-b@example.com"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_reset_password_is_rate_limited_per_ip(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "PASSWORD_RESET_RATE_LIMIT_PER_IP", 1)
+
+    first = await client.post(
+        "/v1/auth/password/reset",
+        json={"token": "not-a-real-token-a", "new_password": "whatever12345"},
+    )
+    assert first.status_code == 400
+
+    blocked = await client.post(
+        "/v1/auth/password/reset",
+        json={"token": "not-a-real-token-b", "new_password": "whatever12345"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+
 def test_get_client_ip_uses_the_first_forwarded_for_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2,12 +2,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.client_type import ClientType
 from kalekit.auth.service import hash_password
 from kalekit.models.email_verification_token import EmailVerificationToken
+from kalekit.models.password_reset_token import PasswordResetToken
 from kalekit.models.refresh_token import RefreshToken
 from kalekit.models.user import User
 
@@ -99,6 +100,79 @@ async def invalidate_user_verification_tokens(
     for token in result.scalars():
         token.used_at = now
     await session.flush()
+
+
+async def create_password_reset_token(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    token_hash: str,
+    expires_at: datetime,
+) -> PasswordResetToken:
+    token = PasswordResetToken(
+        user_id=user_id,
+        token_hash=token_hash,
+        expires_at=expires_at,
+    )
+    session.add(token)
+    await session.flush()
+    return token
+
+
+async def invalidate_user_password_reset_tokens(
+    session: AsyncSession, user_id: uuid.UUID
+) -> None:
+    """Burn any outstanding reset tokens before issuing a fresh one, so
+    an earlier emailed link stops working once a new reset is
+    requested -- mirrors `invalidate_user_verification_tokens`."""
+    result = await session.execute(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user_id,
+            PasswordResetToken.used_at.is_(None),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    for token in result.scalars():
+        token.used_at = now
+    await session.flush()
+
+
+async def claim_password_reset_token(
+    session: AsyncSession, token_hash: str
+) -> PasswordResetToken | None:
+    """Atomically redeem a password-reset token: valid iff it exists,
+    is unused, and hasn't expired, and this call is what marks it used.
+
+    Unlike `get_valid_verification_token` (a plain SELECT, with the
+    caller separately flipping `used_at` once it decides to consume the
+    token), this does the check-and-consume as one UPDATE ... WHERE
+    used_at IS NULL statement. That closes the race a get-then-mark
+    pattern leaves open: two requests redeeming the same raw token at
+    the same instant (a doubled-up client retry, or an attacker racing
+    a legitimate reset) would otherwise both pass a SELECT-based
+    validity check before either one's UPDATE lands, and both would go
+    on to reset the password / revoke sessions. Here, only the request
+    whose UPDATE actually flips a row (0 -> 1 rows matched) gets a
+    non-None result back -- the loser's WHERE clause matches nothing
+    once the winner's write is visible, which Postgres's row-level
+    locking on the UPDATE guarantees even for two fully concurrent
+    transactions. Worth the extra care here specifically (unlike the
+    invitation/verification tokens) because redeeming this token
+    doesn't just flip a boolean -- it authorizes a password change plus
+    a full session wipe.
+    """
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        update(PasswordResetToken)
+        .where(
+            PasswordResetToken.token_hash == token_hash,
+            PasswordResetToken.used_at.is_(None),
+            PasswordResetToken.expires_at >= now,
+        )
+        .values(used_at=now)
+        .returning(PasswordResetToken)
+    )
+    return result.scalar_one_or_none()
 
 
 async def store_refresh_token(
