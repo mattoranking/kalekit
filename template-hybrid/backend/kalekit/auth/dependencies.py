@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from typing import Annotated
 from uuid import UUID
 
+import jwt
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,7 +33,7 @@ async def get_current_user(
             raise HTTPException(status_code=401, detail="Invalid token type")
         user_id = payload.get("sub")
         jti = payload.get("jti")
-    except JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
     if jti and await is_token_blocked(jti):
@@ -58,7 +58,7 @@ async def get_current_jti(
             settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM],
         )
-    except JWTError:
+    except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
     return payload.get("jti")
 
