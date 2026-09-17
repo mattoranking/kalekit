@@ -34,11 +34,16 @@ class RoleSeedFile(BaseModel):
     @model_validator(mode="after")
     def _validate_permissions(self) -> "RoleSeedFile":
         """Every role's `permissions` must be exactly `["*"]`, or a list
-        where every entry is a known scope -- not a mix of the two, and
-        not a typo'd scope string. This file is the security-sensitive
-        source of truth `ensure_default_roles` grants from, so a bad
-        entry should fail loudly here rather than silently create an
-        unusable `Permission` row at the DB layer.
+        of known, non-duplicated scopes -- not a mix of the wildcard
+        with explicit scopes, not a typo'd scope string, and not the
+        same scope listed twice (a duplicate would make
+        `_ensure_role_permissions`'s insert loop attempt two identical
+        `RolePermission` rows in the same `begin_nested()`, which fails
+        the primary key and silently rolls back every other permission
+        grant in that call). This file is the security-sensitive source
+        of truth `ensure_default_roles` grants from, so a bad entry
+        should fail loudly here rather than silently no-op at the DB
+        layer.
         """
         supported = set(SCOPES_SUPPORTED)
         for name, definition in self.roles.items():
@@ -57,6 +62,15 @@ class RoleSeedFile(BaseModel):
                     f"role '{name}' lists permission(s) not in "
                     f"SCOPES_SUPPORTED: {unknown!r} "
                     f"(valid values: {sorted(supported)!r})"
+                )
+            if len(permissions) != len(set(permissions)):
+                duplicates = sorted(
+                    {p for p in permissions if permissions.count(p) > 1}
+                )
+                raise ValueError(
+                    f"role '{name}' lists duplicate permission(s): "
+                    f"{duplicates!r} -- each permission must appear at "
+                    "most once"
                 )
         return self
 

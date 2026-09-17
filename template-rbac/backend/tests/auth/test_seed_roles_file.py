@@ -83,6 +83,27 @@ def test_role_seed_file_rejects_unknown_permission() -> None:
         )
 
 
+def test_role_seed_file_rejects_duplicate_permission() -> None:
+    """A role listing the same (valid) permission twice must fail at
+    load time -- otherwise `_ensure_role_permissions` would try to
+    insert two identical `RolePermission` rows in the same
+    `begin_nested()`, hit the primary key, and silently roll back every
+    other permission grant in that call."""
+    with pytest.raises(ValidationError, match="posts:write"):
+        RoleSeedFile.model_validate(
+            {
+                "roles": {
+                    "visitor": {"description": "x", "permissions": []},
+                    "admin": {"description": "y", "permissions": ["*"]},
+                    "editor": {
+                        "description": "z",
+                        "permissions": ["posts:write", "posts:write"],
+                    },
+                }
+            }
+        )
+
+
 def test_role_seed_file_rejects_wildcard_mixed_with_explicit_scopes() -> None:
     """'*' means 'every supported scope' -- mixing it with explicit
     scopes in the same list is ambiguous and must be rejected."""
