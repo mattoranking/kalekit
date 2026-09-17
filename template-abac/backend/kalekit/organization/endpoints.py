@@ -2,6 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import (
@@ -135,7 +136,7 @@ async def accept_invitation(
     body: AcceptInvitationRequest,
     session: Annotated[AsyncSession, Depends(get_db_session)],
     user: Annotated[User, Depends(get_current_user)],
-) -> MemberResponse:
+) -> MemberResponse | JSONResponse:
     """Creates the membership the invitation names -- only for the
     authenticated user whose own email matches it. The invitee's email
     is never trusted from the request body, only from `user`, so
@@ -166,6 +167,17 @@ async def accept_invitation(
         # itself is idempotent, but the invitation's single-use guarantee
         # means only one accept of a given token should ever look like
         # "this just made you a member".
-        raise HTTPException(status_code=409, detail="Already a member")
+        #
+        # Returned (not raised) deliberately: `get_db_session` commits on
+        # a normal return and rolls back on any exception propagating out
+        # of the endpoint. An `HTTPException` here would roll back the
+        # `mark_invitation_accepted` flush above along with it, leaving
+        # `accepted_at` NULL -- the token would silently still be valid
+        # and replayable despite the 409, contradicting the single-use
+        # guarantee this whole endpoint exists to enforce. Returning a
+        # `Response` subclass directly bypasses `response_model`
+        # validation, so the 409 body is constructed by hand instead of
+        # via `MemberResponse`.
+        return JSONResponse(status_code=409, content={"detail": "Already a member"})
 
     return MemberResponse(user_id=user.id, email=user.email)

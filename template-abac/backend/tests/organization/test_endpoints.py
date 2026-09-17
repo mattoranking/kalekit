@@ -228,6 +228,19 @@ async def test_accepting_a_fresh_invite_while_already_a_member_returns_409(
     )
     assert result.scalar_one() == 2  # alice (owner) + bob, no duplicate
 
+    # The 409 above must not have left the token usable: it was
+    # genuinely consumed (`accepted_at` set), not silently left valid by
+    # a rollback that undid `mark_invitation_accepted` along with the
+    # error response. A second accept of the *same* token now sees an
+    # already-accepted, no-longer-valid invitation -- 400, not another
+    # 409 -- which is the only observable proof the mark stuck.
+    replay = await client.post(
+        "/v1/invitations/accept",
+        json={"token": raw_token},
+        headers=auth_header(token_bob),
+    )
+    assert replay.status_code == 400
+
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_non_member_cannot_invite(
