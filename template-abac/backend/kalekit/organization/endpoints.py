@@ -119,9 +119,14 @@ async def remove_organization_member(
 
     Refuses (409) to remove the organization's last member -- an org
     must never reach zero members through this API. 404 if `user_id`
-    isn't currently a member (including the caller removing themselves
-    via this route; they should use `POST .../leave` instead, which
-    carries the same last-member protection).
+    isn't currently a member.
+
+    An admin removing *themselves* via this route works the same as
+    removing anyone else (they're gated on `require_org_admin`, which
+    they've already satisfied) -- this isn't the intended way for an
+    admin to leave, though; `POST .../leave` is, since it's open to
+    any member (not just an admin) and carries the identical
+    last-member protection.
     """
     try:
         member = await remove_member(
