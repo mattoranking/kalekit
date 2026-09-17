@@ -29,7 +29,11 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.client_type import ClientType
-from kalekit.auth.permissions import get_redis, get_scopes_for_roles
+from kalekit.auth.permissions import (
+    get_redis,
+    get_scopes_for_roles,
+    store_oauth_reauth_ticket,
+)
 from kalekit.auth.repository import store_refresh_token
 from kalekit.auth.schemas import TokenResponse
 from kalekit.auth.service import (
@@ -90,6 +94,7 @@ async def oauth_authorize(
     provider: str,
     redirect_to: Annotated[str | None, Query()] = None,
     client_type: Annotated[ClientType, Query(alias="client")] = ClientType.web,
+    reauth: Annotated[bool, Query()] = False,
 ):
     """Generate an authorization URL and return it to the frontend.
 
@@ -105,6 +110,13 @@ async def oauth_authorize(
     -- see #6); validated here (an unknown value 422s) and carried
     through Redis the same way `redirect_to` is, since the callback --
     not this endpoint -- is what actually mints the token pair.
+
+    `reauth` is set by the frontend's step-up flow (#16) for an
+    OAuth-only user who has no password to re-enter for
+    POST /auth/reauthenticate -- "complete a fresh provider login"
+    instead. It's carried through Redis the same way, and makes the
+    callback mint a single-use re-auth ticket instead of a brand-new
+    session/token pair.
     """
     provider_client = _get_provider(provider)
     state = secrets.token_urlsafe(32)
@@ -124,6 +136,7 @@ async def oauth_authorize(
             "code_verifier": code_verifier,
             "redirect_to": target,
             "client": client_type.value,
+            "reauth": reauth,
         }
     )
     await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
@@ -233,6 +246,31 @@ async def oauth_callback(
         )
     except OAuthAccountLinkingError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+    # --- Step-up re-authentication (#16) ---
+    #
+    # A `reauth=true` authorize call (see oauth_authorize) means this
+    # callback isn't starting a new session at all -- it's an
+    # OAuth-only user proving they can still log into the provider
+    # right now, for POST /auth/reauthenticate. Mint a single-use
+    # ticket instead of a token pair/session: /auth/reauthenticate
+    # (which requires the caller's *existing* bearer token) consumes it
+    # and checks it names the same user before advancing that session's
+    # `auth_time` -- so this callback alone, with no access token of
+    # its own, can never grant or extend a session by itself.
+    if state_data.get("reauth"):
+        reauth_ticket = secrets.token_urlsafe(32)
+        await store_oauth_reauth_ticket(
+            reauth_ticket,
+            str(user.id),
+            ttl_seconds=settings.OAUTH_REAUTH_TICKET_TTL_SECONDS,
+        )
+        separator = "&" if "?" in redirect_to else "?"
+        query = urlencode({"reauth_ticket": reauth_ticket})
+        return RedirectResponse(
+            url=f"{redirect_to}{separator}{query}",
+            status_code=302,
+        )
 
     # --- Issue our token pair ---
     roles = [ur.role.name for ur in user.roles]

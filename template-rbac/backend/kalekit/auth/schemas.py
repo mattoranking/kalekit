@@ -94,3 +94,15 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str
+
+
+class ReauthenticateRequest(BaseModel):
+    # Exactly one of these is required, depending on how the caller
+    # authenticates (see #16): password users re-enter their password;
+    # OAuth-only users (no password_hash) instead pass the single-use
+    # ticket minted by /oauth/{provider}/callback after completing a
+    # fresh provider login with `reauth=true`. Both optional here so
+    # the endpoint itself can give a precise error for whichever one
+    # this particular user actually needed.
+    password: str | None = None
+    oauth_ticket: str | None = None

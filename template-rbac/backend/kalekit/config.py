@@ -216,6 +216,24 @@ class Settings(BaseSettings):
     # and a deployment behind Traefik/another trusted proxy opts in.
     TRUST_PROXY_HEADERS: bool = False
 
+    # How long a post-OAuth-*re-authentication* ticket lives in Redis
+    # before it expires unused (see /oauth/{provider}/callback's `reauth`
+    # branch and POST /auth/reauthenticate, #16). Same shape as
+    # OAUTH_EXCHANGE_CODE_TTL_SECONDS -- single-use, only has to survive
+    # the browser redirect back to the frontend -- kept as a separate
+    # setting rather than reusing that one so the two can be tuned
+    # independently (a re-auth ticket has no reason to share a TTL with
+    # a fresh-login exchange code just because they're both short-lived).
+    OAUTH_REAUTH_TICKET_TTL_SECONDS: int = 60
+
+    # Step-up re-authentication (#16): how old a session's last proven
+    # authentication (password re-entry, or a fresh OAuth provider login)
+    # may be before `require_recent_auth` starts rejecting sensitive
+    # actions with `reauth_required`. Applies uniformly regardless of
+    # client -- a stolen session is exactly as dangerous on web as on
+    # mobile or admin.
+    REAUTH_MAX_AGE_MINUTES: int = 10
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 

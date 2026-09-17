@@ -1,3 +1,5 @@
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 import jwt
@@ -198,6 +200,88 @@ def require_permission(permission: str):
                 status_code=403,
                 detail=f"Missing permission: {permission}",
             )
+        return user
+
+    return checker
+
+
+def require_recent_auth(max_age_minutes: int | None = None):
+    """Dependency factory: gate for sensitive actions that need proof of
+    a *recent* authentication, not merely a currently-valid session
+    (#16). A device left logged in, or a stolen (but not yet detected)
+    session, can hold a perfectly valid access token indefinitely via
+    /auth/refresh -- refreshing proves possession of the refresh token,
+    not a fresh credential check. This composes the same way
+    `require_verified_email` and `require_permission` do: it depends on
+    `get_current_user` (so it still 401s on an invalid/expired/blocked
+    token first) and layers an additional check on top.
+
+    Raises 403 with a distinct, machine-readable `code` --
+    `reauth_required` -- rather than the generic detail string every
+    other check here uses, so a frontend can specifically catch this
+    case and prompt for step-up re-authentication (POST
+    /auth/reauthenticate) before transparently retrying the original
+    request, instead of just surfacing a dead-end "forbidden" error.
+
+    `max_age_minutes` defaults to `settings.REAUTH_MAX_AGE_MINUTES`
+    (read at call time, not decoration time, so a test that monkeypatches
+    the setting doesn't have to reimport/redecorate the route) --
+    callers only need to override it for a route that wants a tighter
+    or looser window than the app-wide default (e.g. admin destructive
+    actions).
+    """
+
+    def _reauth_required() -> HTTPException:
+        return HTTPException(
+            status_code=403,
+            detail={
+                "code": "reauth_required",
+                "message": "Recent authentication required for this action",
+            },
+        )
+
+    async def checker(
+        user: Annotated[User, Depends(get_current_user)],
+        session_id: Annotated[str | None, Depends(get_current_session_id)],
+        db_session: Annotated[AsyncSession, Depends(get_db_session)],
+    ) -> User:
+        # Deferred import: auth.repository imports from auth.service,
+        # which doesn't import dependencies.py, so this isn't a real
+        # cycle -- but keeping the import local to the one dependency
+        # that needs it (rather than at module scope, alongside every
+        # other unconditionally-needed import above) keeps this
+        # module's import-time footprint the same as before for every
+        # caller that never touches require_recent_auth.
+        from kalekit.auth.repository import get_active_refresh_token_by_family
+
+        # No `sid` claim at all (e.g. a token minted outside
+        # login/refresh/OAuth): there's no session row to read a recent
+        # auth_time from, so fail closed the same way change_password
+        # and require_permission-adjacent checks do for a missing/bad
+        # session id, rather than trusting an unverifiable claim.
+        if not session_id:
+            raise _reauth_required()
+        try:
+            family_id = uuid.UUID(session_id)
+        except ValueError:
+            raise _reauth_required()
+
+        token_row = await get_active_refresh_token_by_family(db_session, family_id)
+        # A dead/unknown family, or (defense in depth) one that somehow
+        # doesn't belong to this token's own subject, is just as
+        # untrustworthy as a missing session id.
+        if token_row is None or token_row.user_id != user.id:
+            raise _reauth_required()
+
+        limit = timedelta(
+            minutes=max_age_minutes
+            if max_age_minutes is not None
+            else settings.REAUTH_MAX_AGE_MINUTES
+        )
+        age = datetime.now(timezone.utc) - token_row.auth_time
+        if age > limit:
+            raise _reauth_required()
+
         return user
 
     return checker

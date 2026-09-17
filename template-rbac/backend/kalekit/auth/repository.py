@@ -183,6 +183,7 @@ async def store_refresh_token(
     client: ClientType,
     family_id: uuid.UUID | None = None,
     family_created_at: datetime | None = None,
+    auth_time: datetime | None = None,
     device_info: str | None = None,
     ip_address: str | None = None,
 ) -> RefreshToken:
@@ -198,6 +199,13 @@ async def store_refresh_token(
     RefreshToken.family_created_at) and must never move. Omit it only
     when starting a brand-new family, where the column default ("now")
     is correct.
+
+    `auth_time` must also be carried forward from the predecessor on
+    rotation (see RefreshToken.auth_time, #16) -- refreshing a session
+    is not itself proof of identity, so a rotation must never advance
+    it. Omit it only when starting a brand-new family (login, OAuth
+    callback), where the column default ("now") is correct -- a fresh
+    login/OAuth exchange *is* a fresh authentication.
 
     `client` is a `ClientType`, not a raw string -- the DB column is a
     plain String (see RefreshToken.client), but taking a validated enum
@@ -219,6 +227,7 @@ async def store_refresh_token(
             if family_created_at is not None
             else {}
         ),
+        **({"auth_time": auth_time} if auth_time is not None else {}),
     )
     session.add(token)
     await session.flush()
@@ -407,6 +416,49 @@ async def get_family_owner(
         .limit(1)
     )
     return result.scalar_one_or_none()
+
+
+async def get_active_refresh_token_by_family(
+    session: AsyncSession, family_id: uuid.UUID
+) -> RefreshToken | None:
+    """The single currently-usable row for a token family (session), or
+    None if the family has no active row (dead: fully revoked or every
+    row naturally expired).
+
+    Used by `require_recent_auth` (via the caller's `sid` claim) to read
+    the session's `auth_time`, and by POST /auth/reauthenticate to
+    advance it -- both need the *live* row, not just any row in the
+    family's rotation history, so this applies the same
+    revoked/unexpired + "most recently active" selection
+    `list_user_sessions` uses, just scoped to one family instead of
+    every family a user has. See #16.
+    """
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        select(RefreshToken)
+        .where(
+            RefreshToken.family_id == family_id,
+            RefreshToken.revoked == False,  # noqa: E712
+            RefreshToken.expires_at > now,
+        )
+        .order_by(
+            RefreshToken.last_used_at.desc(),
+            RefreshToken.created_at.desc(),
+            RefreshToken.id.desc(),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def mark_session_reauthenticated(
+    session: AsyncSession, token: RefreshToken
+) -> None:
+    """Record that `token`'s session (family) just proved identity again
+    -- called on a successful POST /auth/reauthenticate. See
+    RefreshToken.auth_time and `require_recent_auth` (#16)."""
+    token.auth_time = datetime.now(timezone.utc)
+    await session.flush()
 
 
 @dataclass
