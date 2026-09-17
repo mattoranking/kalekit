@@ -57,3 +57,7 @@ class InvitationAckResponse(BaseModel):
 
 class AcceptInvitationRequest(BaseModel):
     token: str
+
+
+class ChangeMemberRoleRequest(BaseModel):
+    role: MemberRole

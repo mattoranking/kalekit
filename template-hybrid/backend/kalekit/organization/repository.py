@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,11 @@ from kalekit.models.organization import MemberRole, Organization, OrganizationMe
 from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.models.user import User
 from kalekit.utils.db.tenancy import tenant_filter
+
+
+class LastOwnerError(Exception):
+    """Raised when a role change or removal would leave the organization
+    with zero owners."""
 
 
 async def create_organization(session: AsyncSession, *, name: str) -> Organization:
@@ -70,6 +75,121 @@ async def add_member(
             raise
         return member, False
     return member, True
+
+
+async def _lock_organization(
+    session: AsyncSession, *, organization_id: uuid.UUID
+) -> Organization | None:
+    """Locks the organization row for the duration of the transaction.
+
+    Serializes concurrent role-change/removal calls against the same
+    org on this lock, so two requests racing to demote/remove the
+    second-to-last owner can't both read "more than one owner left"
+    before either commits -- the same race-safety pattern the ABAC
+    template's `remove_member` uses for last-*member* protection,
+    adapted here to count owners specifically.
+    """
+    result = await session.execute(
+        select(Organization).where(Organization.id == organization_id).with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
+async def _count_owners(
+    session: AsyncSession, *, organization_id: uuid.UUID
+) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(OrganizationMember)
+        .where(
+            tenant_filter(OrganizationMember, organization_id=organization_id),
+            OrganizationMember.role == MemberRole.owner,
+        )
+    )
+    return result.scalar_one()
+
+
+async def change_member_role(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: MemberRole,
+) -> OrganizationMember | None:
+    """Changes `user_id`'s role within `organization_id`.
+
+    Locks the organization row first (see `_lock_organization`) so a
+    demotion away from `owner` can safely check "is this the last
+    owner?" without racing a concurrent demotion/removal of another
+    owner. Raises `LastOwnerError` if `user_id` is currently the sole
+    owner and `role` is anything other than `owner` -- this covers
+    both an admin demoting the last owner and the last owner demoting
+    themselves.
+
+    Returns the updated row, or `None` if `user_id` isn't a member of
+    this organization.
+    """
+    organization = await _lock_organization(
+        session, organization_id=organization_id
+    )
+    if organization is None:
+        return None
+
+    member = await get_member(
+        session, organization_id=organization_id, user_id=user_id
+    )
+    if member is None:
+        return None
+
+    if member.role == MemberRole.owner and role != MemberRole.owner:
+        owner_count = await _count_owners(session, organization_id=organization_id)
+        if owner_count <= 1:
+            raise LastOwnerError()
+
+    member.role = role
+    await session.flush()
+    return member
+
+
+async def remove_member(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> OrganizationMember | None:
+    """Removes `user_id` from `organization_id`.
+
+    Locks the organization row first (see `_lock_organization`) so
+    removal races the same way `change_member_role` does. Raises
+    `LastOwnerError` if `user_id` is currently the organization's sole
+    owner -- covers both an admin removing the last owner and the
+    last owner removing/leaving themselves. (Removing the last
+    *member* overall, when that member isn't the/an owner, is out of
+    scope for issue #30 -- only last-owner protection was asked for.)
+
+    Returns the removed row, or `None` if `user_id` wasn't a member of
+    this organization.
+    """
+    organization = await _lock_organization(
+        session, organization_id=organization_id
+    )
+    if organization is None:
+        return None
+
+    member = await get_member(
+        session, organization_id=organization_id, user_id=user_id
+    )
+    if member is None:
+        return None
+
+    if member.role == MemberRole.owner:
+        owner_count = await _count_owners(session, organization_id=organization_id)
+        if owner_count <= 1:
+            raise LastOwnerError()
+
+    await session.delete(member)
+    await session.flush()
+    return member
 
 
 async def list_members(
