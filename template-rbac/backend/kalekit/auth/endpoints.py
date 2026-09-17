@@ -607,6 +607,34 @@ async def reauthenticate(
     `get_current_user`, same as every other authenticated-but-not-yet-
     stepped-up endpoint.
     """
+    # Validate there's an active session to update *before* checking
+    # either credential -- in particular before consuming the OAuth
+    # ticket below, which is single-use. Checking this first means a
+    # missing/expired/malformed session never burns the caller's ticket
+    # on a request that was going to fail anyway; they can retry the
+    # (still-valid) ticket once they have a real session, instead of
+    # being forced to redo the whole provider re-login.
+    #
+    # `sid` is required here (unlike change-password's best-effort
+    # handling): there's no "fall back to blocking everything" option
+    # for advancing a session's auth_time -- without a real family to
+    # update, there is nothing to step up, so fail closed with a plain
+    # 400 rather than silently no-op.
+    try:
+        family_id = uuid.UUID(session_id) if session_id else None
+    except ValueError:
+        family_id = None
+    if family_id is None:
+        raise HTTPException(
+            status_code=400, detail="No active session to re-authenticate"
+        )
+
+    token_row = await get_active_refresh_token_by_family(session, family_id)
+    if token_row is None or token_row.user_id != user.id:
+        raise HTTPException(
+            status_code=400, detail="No active session to re-authenticate"
+        )
+
     if user.password_hash is not None:
         # Explicit None-check, not truthiness: `password_hash` is
         # nullable to mean "OAuth-only, no password set" (see
@@ -685,26 +713,6 @@ async def reauthenticate(
                 status_code=401,
                 detail="Invalid or expired re-authentication ticket",
             )
-
-    # `sid` is required here (unlike change-password's best-effort
-    # handling): there's no "fall back to blocking everything" option
-    # for advancing a session's auth_time -- without a real family to
-    # update, there is nothing to step up, so fail closed with a plain
-    # 400 rather than silently no-op.
-    try:
-        family_id = uuid.UUID(session_id) if session_id else None
-    except ValueError:
-        family_id = None
-    if family_id is None:
-        raise HTTPException(
-            status_code=400, detail="No active session to re-authenticate"
-        )
-
-    token_row = await get_active_refresh_token_by_family(session, family_id)
-    if token_row is None or token_row.user_id != user.id:
-        raise HTTPException(
-            status_code=400, detail="No active session to re-authenticate"
-        )
 
     await mark_session_reauthenticated(session, token_row)
 
