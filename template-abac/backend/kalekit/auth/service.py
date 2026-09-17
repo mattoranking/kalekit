@@ -6,12 +6,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import jwt
+import redis.exceptions
+import structlog
 from passlib.context import CryptContext
 
 from kalekit.config import settings
 from kalekit.redis import get_redis
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+logger = structlog.get_logger()
 
 
 def hash_password(password: str) -> str:
@@ -98,17 +101,44 @@ async def cache_refresh_grace_pair(
         # A zero/negative grace period means the feature is effectively
         # disabled -- nothing to cache.
         return
-    r = await get_redis()
-    await r.set(
-        f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
-        json.dumps(payload),
-        ex=ttl_seconds,
-    )
+    try:
+        r = await get_redis()
+        await r.set(
+            f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
+            json.dumps(payload),
+            ex=ttl_seconds,
+        )
+    except redis.exceptions.RedisError:
+        # Best-effort only: this cache exists purely to smooth over a
+        # *second*, concurrent legitimate refresh racing the same
+        # about-to-be-rotated token within the grace window (see
+        # refresh() in kalekit.auth.endpoints) -- by the time this is
+        # called, the actual rotation has already committed to the
+        # DB. A transient Redis outage here must not turn an
+        # otherwise-successful refresh into a 500; the caller (and the
+        # client it's responding to) simply loses grace-window
+        # leniency for this one rotation until Redis recovers.
+        logger.warning("refresh_grace_cache_write_failed", exc_info=True)
 
 
 async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
-    r = await get_redis()
-    cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    try:
+        r = await get_redis()
+        cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    except redis.exceptions.RedisError:
+        logger.warning("refresh_grace_cache_read_failed", exc_info=True)
+        return None
     if cached is None:
         return None
-    return json.loads(cached)
+    try:
+        return json.loads(cached)
+    except (TypeError, ValueError):
+        # Corrupt/unexpected cached value -- treat it the same as a
+        # miss rather than letting the JSONDecodeError propagate and
+        # turn this into a 500. The caller already fails closed with a
+        # 401 ("cache entry expired/evicted") on a None return, which
+        # is the right outcome here too: ambiguous, not a confirmed
+        # reuse, so punish only this one request, not the whole
+        # family.
+        logger.warning("refresh_grace_cache_value_corrupt")
+        return None
