@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.blocklist import (
@@ -119,7 +119,6 @@ async def refresh(
     body: RefreshRequest,
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    background_tasks: BackgroundTasks,
 ):
     presented_hash = hash_refresh_token(body.refresh_token)
     # Locked (SELECT ... FOR UPDATE), not the plain lookup: this path
@@ -196,17 +195,29 @@ async def refresh(
     await mark_refresh_token_replaced(session, token_row, new_token_row.id)
 
     response = TokenResponse(access_token=new_access, refresh_token=new_refresh)
-    # Deferred via BackgroundTasks (runs after the response is sent,
-    # which is after `get_db_session`'s post-return commit has already
-    # completed) rather than awaited here -- same reasoning as
-    # organization/endpoints.py's invitation-email deferral: awaiting
-    # this inline would publish the grace-window pair to Redis before
-    # the new refresh-token row is durably committed, so a crash or
-    # unrelated commit failure in between would leave a concurrent
-    # legitimate caller holding a cached pair for a token that was
-    # never actually persisted.
-    background_tasks.add_task(
-        cache_refresh_grace_pair,
+    # Awaited here, inline -- deliberately *before* the request-scoped
+    # commit (get_db_session commits only after this endpoint returns),
+    # not deferred via BackgroundTasks. A BackgroundTasks deferral looks
+    # appealing (it's the pattern organization/endpoints.py uses for
+    # invitation emails, so the cache write only happens once the new
+    # refresh-token row is durably committed) but it's wrong here: this
+    # rotation path takes a row lock (lock_refresh_token_by_hash), and
+    # it's the commit itself that releases that lock. A second,
+    # legitimately-concurrent request blocked on the lock can unblock
+    # the instant this request's commit happens -- which is strictly
+    # *before* a deferred BackgroundTask would run (those only fire
+    # after the response is sent). That request would then find no
+    # cached pair yet and wrongly 401 instead of getting the shared
+    # pair, defeating the grace window's actual purpose. Writing here,
+    # before commit/lock-release, guarantees the cache is populated by
+    # the time any blocked concurrent request can possibly see the
+    # rotated row. This does re-accept a narrower risk (a commit
+    # failure *after* this write leaves a phantom, never-persisted
+    # cache entry) -- same trade-off template-rbac's shipped reference
+    # implementation already makes, and self-correcting: that phantom
+    # token was never stored, so its own next use 401s normally. See
+    # PR #90 round 3 vs round 4 review discussion / issue #91.
+    await cache_refresh_grace_pair(
         presented_hash,
         response.model_dump(),
         ttl_seconds=settings.REFRESH_TOKEN_GRACE_PERIOD_SECONDS,
