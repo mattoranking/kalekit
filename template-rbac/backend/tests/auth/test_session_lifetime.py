@@ -146,16 +146,19 @@ async def test_admin_absolute_timeout_is_configurable(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("client_type", ["web", "mobile"])
 async def test_web_session_used_regularly_stays_valid_past_the_old_7_day_limit(
-    client: AsyncClient, session: AsyncSession
+    client: AsyncClient, session: AsyncSession, client_type: str
 ) -> None:
     """Before #6, every refresh token expired 7 days after it was
     issued (REFRESH_TOKEN_EXPIRE_DAYS), full stop. Web/mobile now have
     no absolute timeout at all -- only a sliding idle timeout -- so a
     session that started well over 7 days ago must still refresh fine
-    as long as it hasn't gone idle."""
-    email = "web-outlives-old-limit@example.com"
-    _, refresh_token = await _login_pair(client, email, client_type="web")
+    as long as it hasn't gone idle. Parametrized over both consumer
+    clients since they're distinct code paths in config and token
+    stamping despite sharing the same policy defaults."""
+    email = f"{client_type}-outlives-old-limit@example.com"
+    _, refresh_token = await _login_pair(client, email, client_type=client_type)
 
     token_row = await _only_token_row(session, email)
     # The session "started" 30 days ago -- long past the old flat

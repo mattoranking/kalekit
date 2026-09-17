@@ -105,7 +105,8 @@ async def get_current_scopes(
 
     This is a convenience snapshot only -- e.g. for a frontend's own
     cheap edge checks (a Next.js middleware redirect) that can tolerate
-    up-to-`ACCESS_TOKEN_EXPIRE_MINUTES` staleness. It is NOT the
+    staleness up to whatever access-token lifetime applies to the
+    caller's client (see Settings.access_token_expire_minutes). It is NOT the
     authority for backend authorization: `require_permission` below
     re-resolves the caller's permissions live against the Redis role
     cache on every request instead of trusting these baked-in scopes,
@@ -169,7 +170,8 @@ def require_permission(permission: str):
     get_current_user already re-fetches the user (and its roles) from
     the DB on every request, the token's scopes bought no real caching
     benefit, only staleness: a revoked role would otherwise keep
-    working for up to ACCESS_TOKEN_EXPIRE_MINUTES. Resolving live here
+    working for up to whatever access-token lifetime applies to that
+    client (see Settings.access_token_expire_minutes). Resolving live here
     means a role or permission change applies on the very next request,
     for every client, with only the Redis role-cache TTL
     (ROLE_CACHE_TTL_SECONDS) as the remaining delay. See #6.
