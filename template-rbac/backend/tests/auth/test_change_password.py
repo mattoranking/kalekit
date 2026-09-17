@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
+import jwt
 import pytest
 from httpx import AsyncClient
-from jose import jwt
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import find_user_by_email
@@ -22,9 +22,13 @@ def _access_token_with_bad_sid(user_id: str) -> str:
         "type": "access",
         "sid": "not-a-uuid",
         "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        "aud": "web",
     }
     return jwt.encode(
-        payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
+        payload,
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM,
+        headers={"kid": settings.JWT_KID},
     )
 
 

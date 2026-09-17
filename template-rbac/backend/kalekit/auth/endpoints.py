@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.client_type import ClientType
 from kalekit.auth.dependencies import (
     get_current_jti,
     get_current_session_id,
@@ -61,6 +62,7 @@ from kalekit.auth.service import (
     hash_verification_token,
     verification_token_expiry,
     verify_and_upgrade_password,
+    verify_password,
 )
 from kalekit.config import settings
 from kalekit.models.user import User
@@ -169,22 +171,28 @@ async def login(
 
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
-    refresh_token, expires_at = generate_refresh_token()
+    refresh_token, expires_at = generate_refresh_token(body.client)
 
     # Store the refresh token first so its (auto-generated) family_id
     # exists to stamp the access token's `sid` claim with -- that's
     # what ties this access token to the session /auth/sessions and
-    # DELETE /auth/sessions/{id} operate on.
+    # DELETE /auth/sessions/{id} operate on. `family_created_at` is left
+    # unset so the column default ("now") applies -- this is the start
+    # of a brand-new session.
     token_row = await store_refresh_token(
         session,
         user_id=user.id,
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
+        client=body.client.value,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
     access_token = create_access_token(
-        str(user.id), list(scopes), session_id=str(token_row.family_id)
+        str(user.id),
+        list(scopes),
+        client=body.client,
+        session_id=str(token_row.family_id),
     )
 
     return TokenResponse(
@@ -251,7 +259,30 @@ async def refresh(
         raise HTTPException(status_code=401, detail="Refresh token already used")
 
     if token_row.expires_at < now:
+        # The idle timeout: this token's own sliding expiry lapsed
+        # without a refresh in time. Not itself a sign of reuse/theft,
+        # so unlike the branches above this doesn't revoke the family
+        # -- it's just an ordinary "please log in again".
         raise HTTPException(status_code=401, detail="Refresh token expired")
+
+    client = ClientType(token_row.client)
+
+    # The absolute timeout: a session ends this long after the
+    # *original* login, however active it's been, measured from
+    # family_created_at (which rotation -- below -- carries forward
+    # unchanged, unlike expires_at). None means no cutoff for this
+    # client (the default for web/mobile). Checked before minting
+    # anything new, and revokes the family the same way reuse detection
+    # does -- an absolute-timeout session is just as dead as one that
+    # went idle or was explicitly revoked.
+    absolute_timeout = settings.session_absolute_timeout(client)
+    if (
+        absolute_timeout is not None
+        and now - token_row.family_created_at > absolute_timeout
+    ):
+        await revoke_refresh_token_family(session, token_row.family_id)
+        await block_family_tokens(str(token_row.family_id))
+        raise HTTPException(status_code=401, detail="Session expired")
 
     user = await session.get(User, token_row.user_id)
     if not user or not user.is_active:
@@ -260,16 +291,18 @@ async def refresh(
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
     new_access = create_access_token(
-        str(user.id), list(scopes), session_id=str(token_row.family_id)
+        str(user.id), list(scopes), client=client, session_id=str(token_row.family_id)
     )
-    new_refresh, new_expires_at = generate_refresh_token()
+    new_refresh, new_expires_at = generate_refresh_token(client)
 
     new_token_row = await store_refresh_token(
         session,
         user_id=user.id,
         family_id=token_row.family_id,
+        family_created_at=token_row.family_created_at,
         token_hash=hash_refresh_token(new_refresh),
         expires_at=new_expires_at,
+        client=token_row.client,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )

@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr
 
+from kalekit.auth.client_type import ClientType
+
 
 class RegisterRequest(BaseModel):
     email: EmailStr
@@ -12,6 +14,12 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+    # Which client this login is for -- validated input (an unknown
+    # value 422s rather than silently falling back), stamped onto the
+    # issued tokens (RefreshToken.client, the access token's `aud`) and
+    # what determines this session's token lifetimes (see #6). Defaults
+    # to `web` so existing callers that don't send it keep working.
+    client: ClientType = ClientType.web
 
 
 class TokenResponse(BaseModel):

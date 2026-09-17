@@ -105,7 +105,9 @@ async def store_refresh_token(
     user_id: uuid.UUID,
     token_hash: str,
     expires_at: datetime,
+    client: str,
     family_id: uuid.UUID | None = None,
+    family_created_at: datetime | None = None,
     device_info: str | None = None,
     ip_address: str | None = None,
 ) -> RefreshToken:
@@ -115,14 +117,26 @@ async def store_refresh_token(
     rotation of an existing one (carry the predecessor's family_id
     forward); omit it only when starting a brand-new family (login,
     OAuth callback), in which case the column default mints a fresh one.
+
+    `family_created_at` must likewise be carried forward from the
+    predecessor on rotation -- it's the session's absolute start (see
+    RefreshToken.family_created_at) and must never move. Omit it only
+    when starting a brand-new family, where the column default ("now")
+    is correct.
     """
     token = RefreshToken(
         user_id=user_id,
         token_hash=token_hash,
         expires_at=expires_at,
+        client=client,
         device_info=device_info,
         ip_address=ip_address,
         **({"family_id": family_id} if family_id is not None else {}),
+        **(
+            {"family_created_at": family_created_at}
+            if family_created_at is not None
+            else {}
+        ),
     )
     session.add(token)
     await session.flush()

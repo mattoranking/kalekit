@@ -35,7 +35,7 @@ async def get_permissions_for_roles(
             await r.set(
                 f"role:{role}:permissions",
                 json.dumps(list(perms)),
-                ex=300,  # 5 min TTL
+                ex=settings.ROLE_CACHE_TTL_SECONDS,
             )
             permissions.update(perms)
     return permissions
@@ -113,7 +113,7 @@ async def block_token(jti: str, ttl_seconds: int | None = None) -> None:
     auto-expire once the token would have expired anyway.
     """
     r = await get_redis()
-    ttl = ttl_seconds or settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    ttl = ttl_seconds or settings.access_token_max_expire_minutes() * 60
     await r.set(f"{_BLOCKLIST_PREFIX}{jti}", "1", ex=ttl)
 
 
@@ -132,7 +132,7 @@ async def block_all_user_tokens(user_id: str) -> None:
     TTL matches access token lifetime.
     """
     r = await get_redis()
-    ttl = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    ttl = settings.access_token_max_expire_minutes() * 60
     await r.set(f"blocked_user:{user_id}", "1", ex=ttl)
 
 
@@ -157,7 +157,7 @@ async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) ->
     ttl = (
         ttl_seconds
         if ttl_seconds is not None
-        else settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        else settings.access_token_max_expire_minutes() * 60
     )
     await r.set(f"blocked_family:{family_id}", "1", ex=ttl)
 

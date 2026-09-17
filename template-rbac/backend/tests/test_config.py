@@ -1,5 +1,8 @@
+from datetime import timedelta
+
 import pytest
 
+from kalekit.auth.client_type import ClientType
 from kalekit.config import Environment, Settings
 
 
@@ -73,3 +76,55 @@ def test_non_dev_environments_accept_strong_secret(env: Environment) -> None:
     settings = _settings(env, "s" * 32)
 
     assert settings.JWT_SECRET_KEY == "s" * 32
+
+
+# --- Per-client token/session policy (see #6) -------------------------
+
+
+def test_admin_gets_a_shorter_access_token_lifetime_than_web_and_mobile() -> None:
+    """The suggested defaults (web/mobile 15m, admin 5m) from the
+    issue's acceptance criteria: a compromised admin token should be
+    live for less time than a compromised consumer one."""
+    settings = _settings(Environment.testing, "s" * 32)
+
+    admin_minutes = settings.access_token_expire_minutes(ClientType.admin)
+    web_minutes = settings.access_token_expire_minutes(ClientType.web)
+    mobile_minutes = settings.access_token_expire_minutes(ClientType.mobile)
+
+    assert admin_minutes < web_minutes
+    assert admin_minutes < mobile_minutes
+
+
+def test_access_token_max_expire_minutes_is_the_longest_of_the_three() -> None:
+    settings = _settings(Environment.testing, "s" * 32)
+
+    assert settings.access_token_max_expire_minutes() == max(
+        settings.ACCESS_TOKEN_EXPIRE_MINUTES_WEB,
+        settings.ACCESS_TOKEN_EXPIRE_MINUTES_MOBILE,
+        settings.ACCESS_TOKEN_EXPIRE_MINUTES_ADMIN,
+    )
+
+
+def test_admin_idle_timeout_is_far_shorter_than_web_and_mobile() -> None:
+    """Suggested defaults: web/mobile 90 days, admin 30 minutes."""
+    settings = _settings(Environment.testing, "s" * 32)
+
+    assert settings.session_idle_timeout(ClientType.admin) == timedelta(minutes=30)
+    assert settings.session_idle_timeout(ClientType.web) == timedelta(days=90)
+    assert settings.session_idle_timeout(ClientType.mobile) == timedelta(days=90)
+
+
+def test_web_and_mobile_have_no_absolute_session_timeout_by_default() -> None:
+    """Consumer clients should keep an active user signed in
+    indefinitely -- only a fixed idle timeout applies to them."""
+    settings = _settings(Environment.testing, "s" * 32)
+
+    assert settings.session_absolute_timeout(ClientType.web) is None
+    assert settings.session_absolute_timeout(ClientType.mobile) is None
+
+
+def test_admin_has_a_strict_absolute_session_timeout_by_default() -> None:
+    """Suggested default: 12 hours, regardless of activity."""
+    settings = _settings(Environment.testing, "s" * 32)
+
+    assert settings.session_absolute_timeout(ClientType.admin) == timedelta(hours=12)

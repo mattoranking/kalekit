@@ -1,5 +1,6 @@
 from urllib.parse import parse_qs, urlsplit
 
+import jwt
 import pytest
 from httpx import AsyncClient
 
@@ -9,12 +10,19 @@ from kalekit.config import settings
 from kalekit.oauth.client import OAUTH_PROVIDERS
 
 
-async def _prime_state(client: AsyncClient, *, redirect_to: str | None = None) -> str:
+async def _prime_state(
+    client: AsyncClient,
+    *,
+    redirect_to: str | None = None,
+    client_type: str | None = None,
+) -> str:
     """Call the real /authorize endpoint to get a valid state token
     stored in Redis, exactly as the browser would obtain one."""
     params = {}
     if redirect_to is not None:
         params["redirect_to"] = redirect_to
+    if client_type is not None:
+        params["client"] = client_type
     response = await client.get(
         "/v1/oauth/github/authorize", params=params, follow_redirects=False
     )
@@ -229,3 +237,46 @@ async def test_callback_rejects_invalid_state(client: AsyncClient) -> None:
     )
 
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_authorize_rejects_unknown_client(client: AsyncClient) -> None:
+    response = await client.get(
+        "/v1/oauth/github/authorize", params={"client": "not-a-real-client"}
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_oauth_login_mints_a_token_bound_to_the_requested_client(
+    client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client requested at /authorize (e.g. "admin") is carried
+    through the OAuth flow and stamped onto the minted access token's
+    `aud` claim, exactly like a password login's `client` field. See
+    #6."""
+    _mock_provider(monkeypatch)
+    state = await _prime_state(client, client_type="admin")
+
+    callback_response = await client.get(
+        "/v1/oauth/github/callback",
+        params={"code": "provider-code", "state": state},
+        follow_redirects=False,
+    )
+    location = callback_response.headers["location"]
+    exchange_code = parse_qs(urlsplit(location).query)["code"][0]
+
+    exchange_response = await client.post(
+        "/v1/oauth/exchange", json={"code": exchange_code}
+    )
+    assert exchange_response.status_code == 200
+    access_token = exchange_response.json()["access_token"]
+
+    payload = jwt.decode(
+        access_token,
+        settings.JWT_SECRET_KEY,
+        algorithms=[settings.JWT_ALGORITHM],
+        audience="admin",
+    )
+    assert payload["aud"] == "admin"

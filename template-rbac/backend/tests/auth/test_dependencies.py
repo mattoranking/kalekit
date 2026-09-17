@@ -10,7 +10,13 @@ import pytest
 from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
-from kalekit.auth.dependencies import _decode_access_token, _signing_key_for_kid
+from kalekit.auth.client_type import ClientType
+from kalekit.auth.dependencies import (
+    _decode_access_token,
+    _signing_key_for_kid,
+    get_current_client,
+    require_admin_client,
+)
 from kalekit.config import settings
 
 
@@ -52,7 +58,7 @@ def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
         "scopes": ["read"],
         "type": "access",
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=15)).timestamp()),
-        "aud": settings.JWT_AUDIENCE,
+        "aud": ClientType.web.value,
     }
     signing_input = (
         _b64url(json.dumps(header, separators=(",", ":")).encode())
@@ -72,7 +78,7 @@ def _make_token(
     key: str = settings.JWT_SECRET_KEY,
     kid: Any = settings.JWT_KID,
     algorithm: str = settings.JWT_ALGORITHM,
-    aud: str | None = settings.JWT_AUDIENCE,
+    aud: str | None = ClientType.web.value,
     exp_delta: timedelta = timedelta(minutes=15),
     token_type: str = "access",
 ) -> str:
@@ -234,3 +240,46 @@ def test_decode_rejects_token_with_wrong_algorithm() -> None:
         _decode_access_token(_credentials(token))
 
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("client_type", list(ClientType))
+def test_decode_accepts_every_valid_client_as_audience(
+    client_type: ClientType,
+) -> None:
+    """`aud` isn't pinned to one fixed value -- any of web/mobile/admin
+    is a legitimate audience, since it's what client-binding (#6) is
+    keyed on."""
+    token = _make_token(aud=client_type.value)
+
+    payload = _decode_access_token(_credentials(token))
+
+    assert payload["aud"] == client_type.value
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_get_current_client_returns_the_tokens_audience() -> None:
+    token = _make_token(aud=ClientType.admin.value)
+
+    client_type = await get_current_client(_credentials(token))
+
+    assert client_type is ClientType.admin
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_require_admin_client_allows_an_admin_token() -> None:
+    # Should not raise.
+    await require_admin_client(ClientType.admin)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("client_type", [ClientType.web, ClientType.mobile])
+async def test_require_admin_client_rejects_non_admin_tokens(
+    client_type: ClientType,
+) -> None:
+    """A token minted for web or mobile must be rejected here even if
+    the caller's scopes include admin permissions -- require_admin_client
+    only ever looks at `aud`, never at scopes. See #6."""
+    with pytest.raises(HTTPException) as exc_info:
+        await require_admin_client(client_type)
+
+    assert exc_info.value.status_code == 403

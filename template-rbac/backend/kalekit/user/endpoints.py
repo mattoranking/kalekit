@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import require_permission
+from kalekit.auth.dependencies import require_admin_client, require_permission
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.user.repository import get_users
@@ -20,6 +20,11 @@ router = APIRouter(prefix="/users", tags=["users"])
 async def list_users(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     _caller: Annotated[User, Depends(require_permission("users:read"))],
+    # This is a back-office capability (listing every user), so beyond
+    # holding `users:read` the caller's token must have been minted by
+    # the admin client itself -- a web/mobile session for a user who
+    # happens to have the admin role doesn't qualify. See #6.
+    _admin_client: Annotated[None, Depends(require_admin_client)],
     page: Annotated[int, Query(ge=1)] = 1,
     size: Annotated[int, Query(ge=1, le=100)] = 20,
 ) -> UserListResponse:
