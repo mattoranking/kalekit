@@ -142,6 +142,32 @@ async def is_user_blocked(user_id: str) -> bool:
     return await r.exists(f"blocked_user:{user_id}") > 0
 
 
+async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) -> None:
+    """Flag a single session (token family) so get_current_user rejects
+    any access token minted under it -- even ones whose jti we don't
+    know. Access tokens carry the family_id that minted them as the
+    `sid` claim (see create_access_token), which is what lets this be
+    scoped to one session instead of blocking every session the user
+    has the way block_all_user_tokens does. Used when a specific
+    session is revoked (DELETE /auth/sessions/{id}) or when other
+    sessions are killed on password change while the current one is
+    kept. TTL matches access token lifetime.
+    """
+    r = await get_redis()
+    ttl = (
+        ttl_seconds
+        if ttl_seconds is not None
+        else settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    )
+    await r.set(f"blocked_family:{family_id}", "1", ex=ttl)
+
+
+async def is_family_blocked(family_id: str) -> bool:
+    """Check if a specific session (token family) has been revoked."""
+    r = await get_redis()
+    return await r.exists(f"blocked_family:{family_id}") > 0
+
+
 # ---------------------------------------------------------------------------
 # Refresh grace window: let two concurrent /auth/refresh calls presenting
 # the same (about-to-be-rotated) token both get back the identical new

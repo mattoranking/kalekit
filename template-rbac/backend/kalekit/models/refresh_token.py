@@ -8,7 +8,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kalekit.utils.db.models import RecordModel
-from kalekit.utils.func import generate_uuid
+from kalekit.utils.func import generate_uuid, utc_now
 
 if TYPE_CHECKING:
     from kalekit.models.user import User
@@ -44,5 +44,14 @@ class RefreshToken(RecordModel):
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     device_info: Mapped[str | None] = mapped_column(String(255))
     ip_address: Mapped[str | None] = mapped_column(String(45))
+
+    # Session activity. Set to "now" every time a row is inserted for
+    # this family (login, or each refresh rotation) -- since a family
+    # gets a new row on every rotation, the most recent row's
+    # last_used_at is the session's last-used time. See
+    # kalekit.auth.repository.list_user_sessions.
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
 
     user: Mapped["User"] = relationship(back_populates="refresh_tokens")

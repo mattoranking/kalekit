@@ -5,7 +5,11 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.permissions import is_token_blocked, is_user_blocked
+from kalekit.auth.permissions import (
+    is_family_blocked,
+    is_token_blocked,
+    is_user_blocked,
+)
 from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
@@ -70,10 +74,13 @@ async def get_current_user(
     payload = _decode_access_token(credentials)
     user_id = payload.get("sub")
     jti = payload.get("jti")
+    sid = payload.get("sid")
 
     if jti and await is_token_blocked(jti):
         raise HTTPException(status_code=401, detail="Token has been revoked")
     if user_id and await is_user_blocked(user_id):
+        raise HTTPException(status_code=401, detail="Token has been revoked")
+    if sid and await is_family_blocked(sid):
         raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = await session.get(User, user_id)
@@ -107,6 +114,17 @@ async def get_current_jti(
     (e.g. on logout) rather than every token the user holds."""
     payload = _decode_access_token(credentials)
     return payload.get("jti")
+
+
+async def get_current_session_id(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> str | None:
+    """The refresh token family (session) the current access token was
+    minted from, if any -- lets /auth/sessions mark the caller's own
+    session and lets password-change/reset keep it while revoking the
+    rest. See create_access_token's `session_id` param."""
+    payload = _decode_access_token(credentials)
+    return payload.get("sid")
 
 
 async def require_verified_email(

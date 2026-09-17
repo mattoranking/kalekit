@@ -87,6 +87,7 @@ def verification_token_expiry() -> datetime:
 def create_access_token(
     user_id: str,
     scopes: list[str],
+    session_id: str | None = None,
 ) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
@@ -99,6 +100,17 @@ def create_access_token(
         "exp": expire,
         "aud": settings.JWT_AUDIENCE,
     }
+    # `session_id` is the refresh token family this access token was
+    # minted from (see kalekit.auth.repository.store_refresh_token /
+    # RefreshToken.family_id). It's what lets /auth/sessions mark the
+    # caller's own session as "current" and lets a single session be
+    # revoked (block_family_tokens) without blocking every session the
+    # user has. Not every access token has one -- register/service
+    # tokens outside the login/refresh/oauth flows don't -- so it's
+    # optional and get_current_user treats a missing sid as "not tied
+    # to any session" rather than an error.
+    if session_id is not None:
+        payload["sid"] = session_id
     return jwt.encode(
         payload,
         settings.JWT_SECRET_KEY,
@@ -127,6 +139,16 @@ def generate_refresh_token() -> tuple[str, datetime]:
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
     return token, expire
+
+
+def device_info_from_user_agent(user_agent: str | None) -> str | None:
+    """Best-effort device label for session listings: the User-Agent
+    header, truncated to fit `refresh_tokens.device_info` (String(255)).
+    There's no client/app-reported device name yet (no client binding --
+    see #6), so the raw UA is the only signal available. Shared by
+    /auth/login, /auth/refresh, and the OAuth callback so every session
+    is captured the same way regardless of how it started."""
+    return user_agent[:255] if user_agent else None
 
 
 def hash_refresh_token(raw_token: str) -> str:

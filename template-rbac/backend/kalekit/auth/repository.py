@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -31,6 +32,13 @@ async def create_user(
     session.add(user)
     await session.flush()
     return user
+
+
+async def update_user_password(
+    session: AsyncSession, user: User, new_password: str
+) -> None:
+    user.password_hash = hash_password(new_password)
+    await session.flush()
 
 
 async def create_verification_token(
@@ -187,3 +195,102 @@ async def revoke_refresh_token_family(
     for token in result.scalars():
         token.revoked = True
     await session.flush()
+
+
+async def revoke_user_refresh_tokens_except_family(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    keep_family_id: uuid.UUID | None,
+) -> list[uuid.UUID]:
+    """End every session the user has *except* `keep_family_id`.
+
+    Used for "sign out everywhere else" flows (password change/reset):
+    the caller's own session survives, every other active family is
+    revoked. Pass `keep_family_id=None` to revoke everything (e.g. the
+    caller's access token doesn't carry a session id -- fail closed
+    rather than guess which family to spare).
+
+    Returns the distinct family_ids that were revoked, so the caller
+    can also block their live access tokens (see
+    kalekit.auth.permissions.block_family_tokens) -- revoking the
+    refresh token alone doesn't invalidate an access token still
+    inside its natural lifetime.
+    """
+    conditions = [
+        RefreshToken.user_id == user_id,
+        RefreshToken.revoked == False,  # noqa: E712
+    ]
+    if keep_family_id is not None:
+        conditions.append(RefreshToken.family_id != keep_family_id)
+
+    result = await session.execute(select(RefreshToken).where(*conditions))
+    revoked_families: set[uuid.UUID] = set()
+    for token in result.scalars():
+        token.revoked = True
+        revoked_families.add(token.family_id)
+    await session.flush()
+    return list(revoked_families)
+
+
+async def get_family_owner(
+    session: AsyncSession, family_id: uuid.UUID
+) -> uuid.UUID | None:
+    """The user_id that owns a token family, or None if the family
+    doesn't exist -- used to check ownership before revoking a session
+    without leaking whether the id belongs to someone else."""
+    result = await session.execute(
+        select(RefreshToken.user_id)
+        .where(RefreshToken.family_id == family_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+@dataclass
+class SessionSummary:
+    family_id: uuid.UUID
+    created_at: datetime
+    last_used_at: datetime
+    device_info: str | None
+    ip_address: str | None
+
+
+async def list_user_sessions(
+    session: AsyncSession, user_id: uuid.UUID
+) -> list[SessionSummary]:
+    """One summary per *active* session (token family): families with
+    no token that's both unrevoked and unexpired are dead sessions
+    (naturally expired or fully revoked) and are excluded entirely --
+    a user shouldn't see a "session" in the list they can't actually
+    do anything with. `created_at` is the family's oldest token (i.e.
+    the session's start, even if that first token has since rotated
+    out or expired); `last_used_at`/`device_info`/`ip_address` come
+    from the most recent token that's still usable, not merely the
+    most recently created one.
+    """
+    result = await session.execute(
+        select(RefreshToken)
+        .where(RefreshToken.user_id == user_id)
+        .order_by(RefreshToken.family_id, RefreshToken.created_at)
+    )
+    families: dict[uuid.UUID, list[RefreshToken]] = {}
+    for token in result.scalars():
+        families.setdefault(token.family_id, []).append(token)
+
+    now = datetime.now(timezone.utc)
+    summaries: list[SessionSummary] = []
+    for family_id, tokens in families.items():
+        usable = [t for t in tokens if not t.revoked and t.expires_at > now]
+        if not usable:
+            continue
+        latest = max(usable, key=lambda t: t.last_used_at)
+        summaries.append(
+            SessionSummary(
+                family_id=family_id,
+                created_at=tokens[0].created_at,
+                last_used_at=latest.last_used_at,
+                device_info=latest.device_info,
+                ip_address=latest.ip_address,
+            )
+        )
+    return summaries

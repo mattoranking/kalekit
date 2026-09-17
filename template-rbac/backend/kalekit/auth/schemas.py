@@ -51,3 +51,24 @@ class UserResponse(BaseModel):
     roles: list[str] = []
 
     model_config = {"from_attributes": True}
+
+
+class SessionResponse(BaseModel):
+    # The refresh token family id -- this *is* the session id: revoking
+    # it (DELETE /auth/sessions/{id}) ends every refresh token that
+    # shares it. See kalekit.models.refresh_token.RefreshToken.family_id.
+    id: uuid.UUID
+    device_info: str | None
+    ip_address: str | None
+    created_at: datetime
+    last_used_at: datetime
+    is_current: bool
+
+
+class SessionListResponse(BaseModel):
+    items: list[SessionResponse]
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
