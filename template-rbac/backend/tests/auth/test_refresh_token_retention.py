@@ -142,8 +142,9 @@ async def test_prune_refresh_tokens_deletes_old_naturally_expired_rows(
     session: AsyncSession,
 ) -> None:
     """A row that died by natural expiry (never revoked, so
-    `updated_at` is still null) must fall back to `created_at` for the
-    retention clock -- it should still be prunable once old enough.
+    `updated_at` is still null) must fall back to `expires_at` (death
+    time) for the retention clock -- it should still be prunable once
+    old enough past its expiry.
     """
     user_id = await _make_user(session, "prune-expired@example.com")
     # Constructed directly (rather than via store_refresh_token + a
@@ -168,6 +169,58 @@ async def test_prune_refresh_tokens_deletes_old_naturally_expired_rows(
     assert deleted == 1
     remaining = await session.get(RefreshToken, token.id)
     assert remaining is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_prune_refresh_tokens_natural_death_fallback_uses_expiry(
+    session: AsyncSession,
+) -> None:
+    """Regression test: a never-touched (never revoked/replaced) row
+    must age out from when it *died* (expires_at), not from when it
+    was *issued* (created_at). A long-lived session's token (e.g. the
+    90-day web/mobile idle timeout, see #6) can have a created_at far
+    older than the retention window while still being freshly dead --
+    using created_at as the fallback would delete it the instant it
+    expires instead of `older_than_days` after that.
+
+    Simulated here with two never-touched tokens, both issued 100 days
+    ago (older than the 30-day retention window many times over):
+    - `recent`: expires_at only 1 day in the past (recently dead) --
+      must survive at `older_than_days=30`.
+    - `long_dead`: expires_at 31 days in the past -- must be pruned,
+      since it's now past the retention window measured from its own
+      death, not its issuance.
+
+    Two separate rows (rather than mutating one row's expires_at
+    in place) so neither assertion is confused by `onupdate` stamping
+    `updated_at` on an UPDATE -- these rows must stay untouched after
+    creation to exercise the "never touched" fallback path at all.
+    """
+    user_id = await _make_user(session, "prune-long-lived-expiry@example.com")
+    recent = RefreshToken(
+        user_id=user_id,
+        token_hash="hash-long-lived-recently-expired",
+        expires_at=NOW - timedelta(days=1),
+        client=ClientType.web.value,
+        created_at=NOW - timedelta(days=100),
+    )
+    long_dead = RefreshToken(
+        user_id=user_id,
+        token_hash="hash-long-lived-long-expired",
+        expires_at=NOW - timedelta(days=31),
+        client=ClientType.web.value,
+        created_at=NOW - timedelta(days=100),
+    )
+    session.add_all([recent, long_dead])
+    await session.flush()
+    assert recent.updated_at is None
+    assert long_dead.updated_at is None
+
+    deleted = await prune_refresh_tokens(session, older_than_days=30)
+
+    assert deleted == 1
+    assert await session.get(RefreshToken, recent.id) is not None
+    assert await session.get(RefreshToken, long_dead.id) is None
 
 
 @pytest.mark.asyncio(loop_scope="session")

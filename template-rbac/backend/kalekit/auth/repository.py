@@ -266,21 +266,29 @@ async def prune_refresh_tokens(session: AsyncSession, *, older_than_days: int) -
     be invoked out of band, e.g. `kalekit.cli prune-refresh-tokens`
     on a daily cron -- see the CLI docstring and README.
 
-    `coalesce(updated_at, created_at)` is the retention clock: rows
-    that were explicitly revoked get `updated_at` bumped by
-    `onupdate=utc_now` (see `mark_refresh_token_replaced` /
-    `revoke_user_refresh_tokens` / `revoke_refresh_token_family`), so
-    those age out from *when they were revoked*; rows that only died
-    by natural expiry and were never otherwise touched have a null
-    `updated_at` and fall back to `created_at`, i.e. age out from
-    *when they were issued*. Only rows that are *currently* dead are
-    ever deleted -- still-usable tokens are untouched regardless of
-    age, since a long-lived session (rotated regularly) must never be
-    pruned out from under its user.
+    `coalesce(updated_at, expires_at)` is the retention clock, and in
+    both cases it resolves to the row's *death time* -- when it
+    stopped being usable -- never its issuance time:
+      - A row that was explicitly revoked or replaced gets `updated_at`
+        bumped by `onupdate=utc_now` (see `mark_refresh_token_replaced`
+        / `revoke_user_refresh_tokens` / `revoke_refresh_token_family`),
+        so it ages out from *when it was revoked*.
+      - A row that only died by natural expiry and was never otherwise
+        touched has a null `updated_at`, so it falls back to
+        `expires_at` and ages out from *when it expired*.
+    Using `created_at` (issuance time) for that fallback instead would
+    be wrong: a long-lived session's token (e.g. the 90-day web/mobile
+    idle timeout, see #6) can easily have a `created_at` that's
+    already further in the past than the retention window the instant
+    it naturally expires, which would delete it immediately instead of
+    `older_than_days` after it actually died. Only rows that are
+    *currently* dead are ever deleted -- still-usable tokens are
+    untouched regardless of age, since a long-lived session (rotated
+    regularly) must never be pruned out from under its user.
     """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=older_than_days)
-    retention_clock = func.coalesce(RefreshToken.updated_at, RefreshToken.created_at)
+    retention_clock = func.coalesce(RefreshToken.updated_at, RefreshToken.expires_at)
     result = await session.execute(
         delete(RefreshToken).where(
             or_(
@@ -337,6 +345,18 @@ async def list_user_sessions(
     fetched -- a user's full (potentially large, ever-growing via
     rotation) token history never has to be loaded into Python. See
     #73.
+
+    `DISTINCT ON (family_id)` picks whichever row sorts first within
+    each family per the `ORDER BY`, so the tiebreak after
+    `last_used_at DESC` matters: two usable rows in the same family
+    can share the exact same `last_used_at` (concurrent/rapid
+    rotation, or just timestamp precision), and without a
+    deterministic secondary key Postgres is free to pick either one
+    arbitrarily -- which would make the reported device/IP for a
+    session flicker between requests with no underlying change.
+    `created_at DESC, id DESC` breaks that tie consistently in favor
+    of the most recently created row (falling back to `id` only for
+    the vanishingly unlikely case two rows share both timestamps).
     """
     now = datetime.now(timezone.utc)
     result = await session.execute(
@@ -353,7 +373,12 @@ async def list_user_sessions(
             RefreshToken.revoked == False,  # noqa: E712
             RefreshToken.expires_at > now,
         )
-        .order_by(RefreshToken.family_id, RefreshToken.last_used_at.desc())
+        .order_by(
+            RefreshToken.family_id,
+            RefreshToken.last_used_at.desc(),
+            RefreshToken.created_at.desc(),
+            RefreshToken.id.desc(),
+        )
     )
     return [
         SessionSummary(
