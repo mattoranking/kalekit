@@ -117,6 +117,15 @@ async def oauth_authorize(
     instead. It's carried through Redis the same way, and makes the
     callback mint a single-use re-auth ticket instead of a brand-new
     session/token pair.
+
+    When `reauth` is set, this also merges the provider's
+    `reauth_params` (e.g. Google's `prompt=login`) into the
+    authorization URL so the IdP is actually forced to re-check the
+    user's credentials, rather than silently completing the flow off
+    an existing provider session. Not every provider supports this --
+    see the per-provider comments in kalekit/oauth/client.py -- so for
+    those, `reauth` still gates the re-auth-ticket callback behavior
+    below, but is best-effort on actually forcing a fresh login.
     """
     provider_client = _get_provider(provider)
     state = secrets.token_urlsafe(32)
@@ -125,7 +134,10 @@ async def oauth_authorize(
     if not _is_allowed_redirect(target):
         raise HTTPException(status_code=400, detail="Redirect target not allowed")
 
-    authorization_url, code_verifier = provider_client.get_authorization_url(state)
+    extra_params = provider_client.reauth_params if reauth else None
+    authorization_url, code_verifier = provider_client.get_authorization_url(
+        state, extra_params=extra_params
+    )
 
     # Store state (and code_verifier for PKCE, the post-login redirect
     # target, and the requesting client) in Redis
