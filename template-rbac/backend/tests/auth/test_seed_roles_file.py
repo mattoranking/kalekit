@@ -64,6 +64,42 @@ def test_role_seed_file_rejects_malformed_shape() -> None:
         RoleSeedFile.model_validate({"roles": {"visitor": {"description": "x"}}})
 
 
+def test_role_seed_file_rejects_unknown_permission() -> None:
+    """A typo'd scope string (e.g. 'psots:write' instead of
+    'posts:write') must fail loudly at load time, not silently create
+    an unusable `Permission` row at the DB layer."""
+    with pytest.raises(ValidationError, match="psots:write"):
+        RoleSeedFile.model_validate(
+            {
+                "roles": {
+                    "visitor": {"description": "x", "permissions": []},
+                    "admin": {"description": "y", "permissions": ["*"]},
+                    "editor": {
+                        "description": "z",
+                        "permissions": ["psots:write"],
+                    },
+                }
+            }
+        )
+
+
+def test_role_seed_file_rejects_wildcard_mixed_with_explicit_scopes() -> None:
+    """'*' means 'every supported scope' -- mixing it with explicit
+    scopes in the same list is ambiguous and must be rejected."""
+    with pytest.raises(ValidationError, match="only entry"):
+        RoleSeedFile.model_validate(
+            {
+                "roles": {
+                    "visitor": {"description": "x", "permissions": []},
+                    "admin": {
+                        "description": "y",
+                        "permissions": ["*", "posts:write"],
+                    },
+                }
+            }
+        )
+
+
 @pytest.mark.asyncio(loop_scope="session")
 async def test_ensure_default_roles_reads_permissions_from_file(
     tmp_path: Path, monkeypatch, session: AsyncSession
@@ -118,3 +154,75 @@ async def test_ensure_default_roles_reads_permissions_from_file(
         )
     ).scalars().all()
     assert len(visitor_permissions) == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_ensure_default_roles_reconciles_new_permissions_on_rerun(
+    tmp_path: Path, monkeypatch, session: AsyncSession
+) -> None:
+    """A permission added to `roles.yaml` for an *already-seeded* role
+    must be granted the next time `ensure_default_roles` runs -- it
+    must not early-return just because the role already has some
+    permissions, which would make editing the file after first seed a
+    no-op and contradict the file's own claim that editing it and
+    redeploying is enough to change what a role can do."""
+    import kalekit.auth.seed as seed_module
+
+    seed_file = tmp_path / "roles.yaml"
+    seed_file.write_text(
+        textwrap.dedent(
+            """\
+            roles:
+              visitor:
+                description: "Default role for new sign-ups"
+                permissions: []
+              admin:
+                description: "Full access"
+                permissions: ["*"]
+              editor:
+                description: "Can write posts"
+                permissions: ["posts:write"]
+            """
+        )
+    )
+    monkeypatch.setattr(seed_module, "ROLE_SEED_FILE", seed_file)
+
+    await ensure_default_roles(session)
+
+    editor = (
+        await session.execute(select(Role).where(Role.name == "editor"))
+    ).scalar_one()
+    first_run_permissions = (
+        await session.execute(
+            select(RolePermission).where(RolePermission.role_id == editor.id)
+        )
+    ).scalars().all()
+    assert len(first_run_permissions) == 1
+
+    # Simulate editing the file and redeploying: editor now also gets
+    # posts:read.
+    seed_file.write_text(
+        textwrap.dedent(
+            """\
+            roles:
+              visitor:
+                description: "Default role for new sign-ups"
+                permissions: []
+              admin:
+                description: "Full access"
+                permissions: ["*"]
+              editor:
+                description: "Can write posts"
+                permissions: ["posts:write", "posts:read"]
+            """
+        )
+    )
+
+    await ensure_default_roles(session)
+
+    second_run_permissions = (
+        await session.execute(
+            select(RolePermission).where(RolePermission.role_id == editor.id)
+        )
+    ).scalars().all()
+    assert len(second_run_permissions) == 2

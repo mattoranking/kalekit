@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,6 +30,35 @@ class RoleDefinition(BaseModel):
 
 class RoleSeedFile(BaseModel):
     roles: dict[str, RoleDefinition]
+
+    @model_validator(mode="after")
+    def _validate_permissions(self) -> "RoleSeedFile":
+        """Every role's `permissions` must be exactly `["*"]`, or a list
+        where every entry is a known scope -- not a mix of the two, and
+        not a typo'd scope string. This file is the security-sensitive
+        source of truth `ensure_default_roles` grants from, so a bad
+        entry should fail loudly here rather than silently create an
+        unusable `Permission` row at the DB layer.
+        """
+        supported = set(SCOPES_SUPPORTED)
+        for name, definition in self.roles.items():
+            permissions = definition.permissions
+            if permissions == [ALL_SCOPES_WILDCARD]:
+                continue
+            if ALL_SCOPES_WILDCARD in permissions:
+                raise ValueError(
+                    f"role '{name}': '{ALL_SCOPES_WILDCARD}' must be the "
+                    "only entry in `permissions` when used -- it cannot be "
+                    f"mixed with explicit scopes, got {permissions!r}"
+                )
+            unknown = sorted(set(permissions) - supported)
+            if unknown:
+                raise ValueError(
+                    f"role '{name}' lists permission(s) not in "
+                    f"SCOPES_SUPPORTED: {unknown!r} "
+                    f"(valid values: {sorted(supported)!r})"
+                )
+        return self
 
 
 def _load_role_definitions() -> dict[str, RoleDefinition]:
@@ -108,24 +137,41 @@ async def _get_or_create_permission(session: AsyncSession, name: str) -> Permiss
 async def _ensure_role_permissions(
     session: AsyncSession, role: Role, permission_names: list[str]
 ) -> None:
+    """Grant `role` every permission in `permission_names` it doesn't
+    already have.
+
+    This reconciles rather than only acting on a never-seeded role: a
+    role that was seeded before with a smaller permission list (or
+    before a `Scope` this role's `"*"` wildcard now covers existed)
+    picks up the newly-added permissions the next time this runs,
+    matching `roles.yaml`'s own claim that editing it and redeploying
+    is enough to change what a role can do. Permissions removed from
+    the file are deliberately left alone -- additive-only, consistent
+    with the rest of this module only ever adding rows.
+    """
     if not permission_names:
         return
 
     existing = await session.execute(
-        select(RolePermission).where(RolePermission.role_id == role.id)
+        select(Permission.name)
+        .join(RolePermission, RolePermission.permission_id == Permission.id)
+        .where(RolePermission.role_id == role.id)
     )
-    if existing.first() is not None:
+    already_granted = set(existing.scalars().all())
+    missing = [name for name in permission_names if name not in already_granted]
+    if not missing:
         return
 
     # Same race as the role/permission lookups above: two concurrent
-    # first-time registrations can both see "no permissions granted to
-    # this role yet" and both try to populate the join table. Only one
-    # wins the (role_id, permission_id) primary key; the loser rolls
-    # back to the savepoint and treats the conflict as "someone else
-    # already did this" rather than a hard failure.
+    # callers can both compute the same "missing" set and both try to
+    # populate the join table. Only one wins the (role_id,
+    # permission_id) primary key; the loser rolls back to the savepoint
+    # and treats the conflict as "someone else already did this" rather
+    # than a hard failure -- the next call to this function will see
+    # the winner's rows and compute a smaller (or empty) `missing` set.
     try:
         async with session.begin_nested():
-            for scope in permission_names:
+            for scope in missing:
                 permission = await _get_or_create_permission(session, scope)
                 session.add(
                     RolePermission(role_id=role.id, permission_id=permission.id)
@@ -146,6 +192,12 @@ async def ensure_default_roles(session: AsyncSession) -> tuple[Role, Role]:
     the Scope enum defines, so there's a working example the moment the
     first user registers -- there is no separate seed script or admin
     invite flow.
+
+    Also runs against a database that was already seeded by an earlier
+    version of `roles.yaml`: `_ensure_role_permissions` grants any
+    permission the file now lists for a role that it doesn't already
+    have, so a permission added to the file after a role's first seed
+    still takes effect on redeploy.
     """
     definitions = _load_role_definitions()
 
