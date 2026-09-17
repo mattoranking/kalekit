@@ -108,22 +108,35 @@ async def test_concurrent_refresh_of_the_same_token_does_not_double_rotate(
 
     original_lock = auth_endpoints.get_refresh_token_by_hash_for_update
     second_call: dict[str, asyncio.Task[Response]] = {}
+    call_count = 0
 
     async def _lock_then_race(session, token_hash):
+        nonlocal call_count
+        call_count += 1
+        this_call = call_count
         token_row = await original_lock(session, token_hash)
-        # The row lock is now held by this (uncommitted) transaction.
-        # Kick off a second, independent refresh for the same token --
-        # it must block on the same lock rather than racing through.
-        task = asyncio.create_task(
-            _refresh_with_own_session(engine, refresh_token)
-        )
-        await asyncio.sleep(0.2)
-        assert not task.done(), (
-            "second concurrent /auth/refresh call for the same token "
-            "completed before the first committed -- the row lock "
-            "isn't serializing rotation"
-        )
-        second_call["task"] = task
+        # Only the *first* call (the original request) spawns a second,
+        # racing request -- without this guard, every subsequent call
+        # (the second request's own call to this patched function, once
+        # it unblocks) would spawn yet another one in turn, chaining
+        # into an unbounded, never-awaited sequence of background
+        # refresh requests instead of the single deterministic race
+        # this test means to set up.
+        if this_call == 1:
+            # The row lock is now held by this (uncommitted)
+            # transaction. Kick off a second, independent refresh for
+            # the same token -- it must block on the same lock rather
+            # than racing through.
+            task = asyncio.create_task(
+                _refresh_with_own_session(engine, refresh_token)
+            )
+            await asyncio.sleep(0.2)
+            assert not task.done(), (
+                "second concurrent /auth/refresh call for the same "
+                "token completed before the first committed -- the "
+                "row lock isn't serializing rotation"
+            )
+            second_call["task"] = task
         return token_row
 
     monkeypatch.setattr(

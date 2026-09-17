@@ -18,7 +18,16 @@ class RefreshToken(RecordModel):
     __tablename__ = "refresh_tokens"
 
     user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
-    token_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Unique, not just indexed: `get_refresh_token_by_hash` (and the
+    # locked `_for_update` variant) look this up with
+    # `scalar_one_or_none()`, which requires at most one row per hash.
+    # It's a sha256 digest of a 256-bit random token, so a collision
+    # should never happen in practice, but the DB constraint is what
+    # actually rules it out instead of just assuming it -- same
+    # convention as `OrganizationInvitation.token_hash`.
+    token_hash: Mapped[str] = mapped_column(
+        String, unique=True, index=True, nullable=False
+    )
 
     # All tokens issued from the same original login/OAuth exchange share a
     # family_id. Rotation carries it forward; reuse of an already-rotated
