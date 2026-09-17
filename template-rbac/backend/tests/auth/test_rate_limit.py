@@ -11,9 +11,26 @@ so it can be exercised in a handful of requests.
 """
 
 import pytest
+from fastapi import Request
 from httpx import AsyncClient
 
 from kalekit.config import settings
+from kalekit.utils.rate_limit import get_client_ip
+
+
+def _request_with_forwarded_for(value: str | None) -> Request:
+    """Build a minimal Request carrying the given X-Forwarded-For header
+    (or none, if `value` is None), with a real ASGI-style peer address
+    so the fallback path has something concrete to fall back to."""
+    headers = []
+    if value is not None:
+        headers.append((b"x-forwarded-for", value.encode()))
+    scope = {
+        "type": "http",
+        "headers": headers,
+        "client": ("203.0.113.9", 12345),
+    }
+    return Request(scope)
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -315,3 +332,48 @@ async def test_rate_limiting_can_be_disabled(
             },
         )
         assert response.status_code == 401
+
+
+def test_get_client_ip_uses_the_first_forwarded_for_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+
+    request = _request_with_forwarded_for("198.51.100.4, 203.0.113.9")
+
+    assert get_client_ip(request) == "198.51.100.4"
+
+
+def test_get_client_ip_falls_back_when_the_forwarded_for_header_is_malformed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test (round-3 Copilot finding on PR #88): a leading
+    empty entry (e.g. a header of ", 1.2.3.4") must not produce an
+    empty-string IP -- that would collapse every client sending such a
+    header onto the same Redis key (`login_rate:ip:`), letting one
+    attacker's malformed header contaminate other callers' throttling."""
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+
+    request = _request_with_forwarded_for(", 1.2.3.4")
+
+    assert get_client_ip(request) == "203.0.113.9"
+
+
+def test_get_client_ip_falls_back_when_the_forwarded_for_header_is_only_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+
+    request = _request_with_forwarded_for("   ")
+
+    assert get_client_ip(request) == "203.0.113.9"
+
+
+def test_get_client_ip_ignores_forwarded_for_when_proxy_headers_are_not_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", False)
+
+    request = _request_with_forwarded_for("198.51.100.4")
+
+    assert get_client_ip(request) == "203.0.113.9"

@@ -92,8 +92,14 @@ def get_client_ip(request: Request) -> str:
         if forwarded_for:
             # The header is a comma-separated list appended to by every
             # hop; the first entry is the original client as seen by the
-            # nearest trusted proxy.
-            return forwarded_for.split(",")[0].strip()
+            # nearest trusted proxy. A malformed/empty leading entry
+            # (e.g. ", 1.2.3.4") would otherwise parse as "" and
+            # collapse every such caller onto the same Redis key --
+            # round-3 Copilot finding on PR #88 -- so fall through to
+            # the ASGI peer address instead of returning that blindly.
+            first_entry = forwarded_for.split(",")[0].strip()
+            if first_entry:
+                return first_entry
 
     if request.client:
         return request.client.host
