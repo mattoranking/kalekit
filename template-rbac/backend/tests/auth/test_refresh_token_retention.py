@@ -272,3 +272,33 @@ async def test_prune_refresh_tokens_never_deletes_usable_rows(
     assert deleted == 0
     remaining = await session.get(RefreshToken, token.id)
     assert remaining is not None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_prune_refresh_tokens_rejects_negative_window(
+    session: AsyncSession,
+) -> None:
+    """A negative `older_than_days` would make `cutoff` a *future*
+    timestamp, so the delete's `retention_clock <= cutoff` check would
+    hold for nearly every already-dead row regardless of how recently
+    it died -- e.g. a typo'd `--older-than-days -5` would prune far
+    more aggressively than intended, silently. Must raise instead of
+    running, and must not delete anything on the way to raising.
+    """
+    user_id = await _make_user(session, "prune-negative-window@example.com")
+    token = await store_refresh_token(
+        session,
+        user_id,
+        token_hash="hash-negative-window",
+        expires_at=NOW + timedelta(days=30),
+        client=ClientType.web,
+    )
+    token.revoked = True
+    token.updated_at = NOW - timedelta(days=40)
+    await session.flush()
+
+    with pytest.raises(ValueError):
+        await prune_refresh_tokens(session, older_than_days=-5)
+
+    remaining = await session.get(RefreshToken, token.id)
+    assert remaining is not None

@@ -255,8 +255,8 @@ async def revoke_user_refresh_tokens_except_family(
 
 
 async def prune_refresh_tokens(session: AsyncSession, *, older_than_days: int) -> int:
-    """Delete dead refresh-token rows (revoked, or expired) whose
-    `updated_at` is older than the given retention window.
+    """Delete dead refresh-token rows (revoked, or expired) that have
+    been dead for at least the given retention window.
 
     This is the retention half of #73: the query rewrite in
     `list_user_sessions` stops dead rows from being loaded into
@@ -285,7 +285,20 @@ async def prune_refresh_tokens(session: AsyncSession, *, older_than_days: int) -
     *currently* dead are ever deleted -- still-usable tokens are
     untouched regardless of age, since a long-lived session (rotated
     regularly) must never be pruned out from under its user.
+
+    Raises `ValueError` if `older_than_days` is negative -- a negative
+    window would make `cutoff` a *future* timestamp, so
+    `retention_clock <= cutoff` would hold for nearly every already-dead
+    row regardless of how recently it died (e.g. a typo'd
+    `--older-than-days -5` would prune far more aggressively than
+    intended, silently). `older_than_days=0` is allowed -- "prune
+    anything that's dead right now" is a well-defined, if aggressive,
+    policy.
     """
+    if older_than_days < 0:
+        raise ValueError(
+            f"older_than_days must be >= 0, got {older_than_days!r}"
+        )
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=older_than_days)
     retention_clock = func.coalesce(RefreshToken.updated_at, RefreshToken.expires_at)
@@ -295,7 +308,9 @@ async def prune_refresh_tokens(session: AsyncSession, *, older_than_days: int) -
                 RefreshToken.revoked == True,  # noqa: E712
                 RefreshToken.expires_at <= now,
             ),
-            retention_clock < cutoff,
+            # "at least older_than_days" -- a row that died exactly on
+            # the cutoff boundary is eligible now, not on the next run.
+            retention_clock <= cutoff,
         )
     )
     await session.flush()
