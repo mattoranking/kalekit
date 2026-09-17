@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -654,9 +654,12 @@ async def resend_verification(
     return MessageResponse(detail="Verification email sent")
 
 
-async def _issue_and_send_password_reset_token(
-    session: AsyncSession, user: User
-) -> None:
+async def _issue_password_reset_token(session: AsyncSession, user: User) -> str:
+    """Persists a fresh reset token for `user` and returns the raw
+    (unhashed) value to email. Only touches the DB -- unlike
+    `_issue_and_send_verification_token`, sending the email is the
+    caller's job, so it can be deferred separately (see
+    `forgot_password`)."""
     raw_token = generate_verification_token()
     await create_password_reset_token(
         session,
@@ -664,7 +667,7 @@ async def _issue_and_send_password_reset_token(
         token_hash=hash_verification_token(raw_token),
         expires_at=password_reset_token_expiry(),
     )
-    await send_password_reset_email(to=user.email, token=raw_token)
+    return raw_token
 
 
 _FORGOT_PASSWORD_RESPONSE = MessageResponse(
@@ -678,14 +681,30 @@ _FORGOT_PASSWORD_RESPONSE = MessageResponse(
 async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     """Always answers 202 with the same body, whether or not `email`
     belongs to a real, active account -- see `_FORGOT_PASSWORD_RESPONSE`.
-    A response (status, body, and -- so far as the rate limiter below is
-    concerned -- timing) that varied by account existence would turn
-    this endpoint into an account-enumeration oracle, exactly the
-    failure mode #17 calls out.
+    A response (status or body) that varied by account existence would
+    turn this endpoint into an account-enumeration oracle, exactly the
+    failure mode #17 calls out -- and so would its *timing*: a known,
+    active account does strictly more work per request than an unknown
+    or inactive one, and for a real (non-`ConsoleEmailSender`) provider
+    the dominant term in that gap is a synchronous network call to send
+    the email, not the one extra token row. That's why the email send
+    below is handed to `background_tasks` instead of being awaited
+    inline -- it runs only *after* this response has already gone out
+    to the caller, so it can't be timed by whoever's asking (round-2
+    Copilot finding on PR #93). The token itself is still written and
+    committed synchronously, through the normal request-scoped session,
+    before this endpoint returns -- deferring that too isn't safe here
+    (this session is closed out by `get_db_session`'s own teardown
+    before background tasks run, so anything needing the DB has to
+    happen inline) and isn't necessary anyway: one fast, indexed INSERT
+    is a far smaller residual timing signal than a network round trip,
+    in the same spirit as the login endpoint's DUMMY_PASSWORD_HASH --
+    substantially closing the gap, not claiming to make it disappear.
     """
     if settings.RATE_LIMIT_ENABLED:
         r = await get_redis()
@@ -729,7 +748,10 @@ async def forgot_password(
         # an earlier emailed link stops working once a new reset is
         # requested (mirrors resend-verification).
         await invalidate_user_password_reset_tokens(session, user.id)
-        await _issue_and_send_password_reset_token(session, user)
+        raw_token = await _issue_password_reset_token(session, user)
+        background_tasks.add_task(
+            send_password_reset_email, to=user.email, token=raw_token
+        )
 
     return _FORGOT_PASSWORD_RESPONSE
 
