@@ -31,11 +31,18 @@ def create_access_token(user_id: str) -> str:
         "jti": str(uuid.uuid4()),
         "type": "access",
         "exp": expire,
+        "aud": settings.JWT_AUDIENCE,
     }
     return jwt.encode(
         payload,
         settings.JWT_SECRET_KEY,
         algorithm=settings.JWT_ALGORITHM,
+        # `kid` identifies which key signed this token, so a secret can
+        # be rotated (new JWT_SECRET_KEY + JWT_KID, old one moved into
+        # JWT_PREVIOUS_KEYS) without invalidating tokens already issued
+        # under the previous key. See _decode_access_token in
+        # kalekit.auth.dependencies.
+        headers={"kid": settings.JWT_KID},
     )
 
 
