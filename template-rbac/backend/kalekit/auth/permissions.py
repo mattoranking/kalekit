@@ -168,6 +168,36 @@ async def is_family_blocked(family_id: str) -> bool:
     return await r.exists(f"blocked_family:{family_id}") > 0
 
 
+async def is_any_blocked(
+    jti: str | None, user_id: str | None, family_id: str | None
+) -> bool:
+    """Combined jti/user/family blocklist check in a single Redis
+    round-trip, for get_current_user's hot path (see #94).
+
+    Equivalent to `is_token_blocked(jti) or is_user_blocked(user_id) or
+    is_family_blocked(family_id)`, but instead of three sequential
+    `EXISTS` round-trips it issues one `MGET` across whichever of the
+    three keys apply. An id that's None (absent from the token) is
+    simply not checked -- same as the `if jti and ...` guards this
+    replaces at the call site -- rather than treated as blocked or not
+    blocked either way.
+    """
+    keys = []
+    if jti:
+        keys.append(f"{_BLOCKLIST_PREFIX}{jti}")
+    if user_id:
+        keys.append(f"blocked_user:{user_id}")
+    if family_id:
+        keys.append(f"blocked_family:{family_id}")
+
+    if not keys:
+        return False
+
+    r = await get_redis()
+    values = await r.mget(keys)
+    return any(v is not None for v in values)
+
+
 # ---------------------------------------------------------------------------
 # Refresh grace window: let two concurrent /auth/refresh calls presenting
 # the same (about-to-be-rotated) token both get back the identical new
