@@ -111,6 +111,51 @@ async def test_a_successful_login_clears_the_account_failure_count(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_account_lockout_recovers_when_its_redis_key_loses_its_ttl(
+    client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test (round-1 Copilot finding on PR #88): the login
+    handler's per-account "peek" path (a plain GET, since only a failed
+    attempt should increment the counter) didn't re-arm a missing TTL
+    the way check_and_increment does, so an account key that somehow
+    lost its expiry -- e.g. a crash between a prior INCR and its
+    EXPIRE -- would block that account forever instead of recovering
+    after the window, once the peek path started short-circuiting
+    every request before check_and_increment ever ran again."""
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_ACCOUNT", 1)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS", 1)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_IP", 1000)
+
+    await register("ttl-recovery@example.com", "correct-password")
+
+    fail = await client.post(
+        "/v1/auth/login",
+        json={"email": "ttl-recovery@example.com", "password": "wrong-password"},
+    )
+    assert fail.status_code == 401
+
+    from kalekit.auth.permissions import get_redis
+
+    r = await get_redis()
+    account_key = "login_rate:account:ttl-recovery@example.com"
+    # Simulate the crash-between-INCR-and-EXPIRE scenario directly,
+    # rather than waiting out a real race: strip the key's TTL while
+    # leaving its count (which is already >= the limit of 1) intact.
+    await r.persist(account_key)
+    assert await r.ttl(account_key) == -1
+
+    blocked = await client.post(
+        "/v1/auth/login",
+        json={"email": "ttl-recovery@example.com", "password": "correct-password"},
+    )
+    assert blocked.status_code == 429
+    # The peek path must have re-armed the TTL instead of leaving it
+    # at -1 forever.
+    assert await r.ttl(account_key) > 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_login_is_also_rate_limited_per_ip(
     client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
 ) -> None:

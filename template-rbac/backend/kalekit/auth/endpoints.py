@@ -171,10 +171,14 @@ async def login(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     r = None
-    # Keyed on the submitted email (lowercased, same normalization
-    # find_user_by_email uses) rather than the resolved user id -- an
-    # unknown email must be throttled the same way a real one is, or
-    # this limit itself becomes an account-enumeration oracle.
+    # Keyed on the submitted email, lowercased -- not on the resolved
+    # user id -- so an unknown email is throttled exactly like a real
+    # one; otherwise this limit itself becomes an account-enumeration
+    # oracle. (find_user_by_email itself does an exact, non-lowercased
+    # match -- this app doesn't normalize email casing anywhere else --
+    # so the lowercasing here is purely to keep this counter from being
+    # split across multiple keys by a caller who varies casing between
+    # requests targeting the same account.)
     account_key = f"login_rate:account:{body.email.lower()}"
     if settings.RATE_LIMIT_ENABLED:
         r = await get_redis()
@@ -193,10 +197,19 @@ async def login(
         # request that goes on to succeed must not have already spent
         # a unit of it just by arriving.
         current_failures = await r.get(account_key)
-        if current_failures and int(current_failures) >= (
-            settings.LOGIN_RATE_LIMIT_PER_ACCOUNT
-        ):
-            raise _rate_limited(await r.ttl(account_key))
+        if current_failures:
+            account_ttl = await r.ttl(account_key)
+            if account_ttl == -1:
+                # Same TTL-recovery this key would otherwise only get
+                # from check_and_increment (see utils/rate_limit.py) --
+                # but this peek path never calls that, so without this
+                # a key that lost its expiry (e.g. a crash between a
+                # prior INCR and its EXPIRE) would block this account
+                # forever instead of resetting after the window.
+                account_ttl = settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                await r.expire(account_key, account_ttl)
+            if int(current_failures) >= settings.LOGIN_RATE_LIMIT_PER_ACCOUNT:
+                raise _rate_limited(account_ttl)
 
     user = await find_user_by_email(session, body.email)
 
