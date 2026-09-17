@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.dependencies import (
     get_current_user,
+    require_org_admin,
     require_org_creator,
     require_org_member,
 )
@@ -14,12 +15,16 @@ from kalekit.config import settings
 from kalekit.models.organization import Organization
 from kalekit.models.user import User
 from kalekit.organization.repository import (
+    LastMemberError,
     add_member,
     create_invitation,
+    create_organization,
     get_valid_invitation_by_token_hash,
     list_members,
     list_user_organizations,
     mark_invitation_accepted,
+    remove_member,
+    rename_organization,
 )
 from kalekit.organization.schemas import (
     AcceptInvitationRequest,
@@ -27,7 +32,9 @@ from kalekit.organization.schemas import (
     InviteMemberRequest,
     MemberListResponse,
     MemberResponse,
+    OrganizationCreateRequest,
     OrganizationListResponse,
+    OrganizationRenameRequest,
     OrganizationResponse,
 )
 from kalekit.organization.service import (
@@ -60,6 +67,101 @@ async def get_my_organizations(
     return OrganizationListResponse(
         items=[OrganizationResponse.model_validate(org) for org in organizations]
     )
+
+
+@router.post("", response_model=OrganizationResponse, status_code=201)
+async def create_new_organization(
+    body: OrganizationCreateRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> OrganizationResponse:
+    """Creates an additional organization for the caller. Unlike the
+    organization created at signup, this is opt-in: any authenticated
+    user may create more organizations, becoming both the creator and
+    first (and, until they invite someone, only) member of each one.
+    """
+    organization = await create_organization(
+        session, name=body.name, created_by=user.id
+    )
+    await add_member(session, organization_id=organization.id, user_id=user.id)
+    return OrganizationResponse.model_validate(organization)
+
+
+@member_router.patch("", response_model=OrganizationResponse)
+async def rename_org(
+    organization_id: UUID,
+    body: OrganizationRenameRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    organization: Annotated[Organization, Depends(require_org_admin)],
+) -> OrganizationResponse:
+    """Renames the organization. Gated by `require_org_admin`: the
+    org's creator, or any member if it has none (see that dependency's
+    docstring) -- 404 to non-members, 403 to a member who isn't the
+    creator of an org that still has one.
+    """
+    organization = await rename_organization(
+        session, organization=organization, name=body.name
+    )
+    return OrganizationResponse.model_validate(organization)
+
+
+@member_router.delete("/members/{user_id}", status_code=204)
+async def remove_organization_member(
+    organization_id: UUID,
+    user_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    _organization: Annotated[Organization, Depends(require_org_admin)],
+) -> None:
+    """Removes a member from the organization. Same admin gate as
+    renaming -- un-inviting someone is as consequential as growing the
+    tenant, which #24 already restricted to the creator (or any member
+    once the org has none, per `require_org_admin`).
+
+    Refuses (409) to remove the organization's last member -- an org
+    must never reach zero members through this API. 404 if `user_id`
+    isn't currently a member (including the caller removing themselves
+    via this route; they should use `POST .../leave` instead, which
+    carries the same last-member protection).
+    """
+    try:
+        member = await remove_member(
+            session, organization_id=organization_id, user_id=user_id
+        )
+    except LastMemberError:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot remove the last member of an organization",
+        )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@member_router.post("/leave", status_code=204)
+async def leave_organization(
+    organization_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(require_org_member)],
+) -> None:
+    """Removes the caller from the organization. Open to any member --
+    unlike removing *someone else*, leaving yourself needs no creator
+    check -- but subject to the same last-member protection: the sole
+    remaining member of an organization cannot leave it (they'd have to
+    delete the organization instead, which is out of scope here pending
+    #16's step-up re-auth).
+    """
+    try:
+        member = await remove_member(
+            session, organization_id=organization_id, user_id=user.id
+        )
+    except LastMemberError:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot leave: you are the last member of this organization",
+        )
+    if member is None:
+        # Unreachable in practice: require_org_member already confirmed
+        # the caller is a member of this organization_id.
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 @member_router.get("/members", response_model=MemberListResponse)

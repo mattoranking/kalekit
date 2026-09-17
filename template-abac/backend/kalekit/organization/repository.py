@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,11 @@ from kalekit.models.organization import Organization, OrganizationMember
 from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.models.user import User
 from kalekit.utils.db.tenancy import tenant_filter
+
+
+class LastMemberError(Exception):
+    """Raised when an operation would remove an organization's last
+    remaining member."""
 
 
 async def create_organization(
@@ -74,6 +79,68 @@ async def add_member(
             raise
         return existing, False
     return member, True
+
+
+async def rename_organization(
+    session: AsyncSession, *, organization: Organization, name: str
+) -> Organization:
+    organization.name = name
+    organization.set_updated_at()
+    await session.flush()
+    return organization
+
+
+async def remove_member(
+    session: AsyncSession, *, organization_id: uuid.UUID, user_id: uuid.UUID
+) -> OrganizationMember | None:
+    """Removes a member from an organization, refusing to let membership
+    reach zero.
+
+    `SELECT ... FOR UPDATE` locks the organization row first, so two
+    concurrent removals against the same org serialize on that lock
+    instead of both reading "more than one member left" before either
+    commits, which would otherwise let them race the org to zero
+    members -- the mirror image of `add_member`'s check-then-insert
+    race safety, but for a delete there's no unique constraint to fall
+    back on, so the lock itself is the guard.
+
+    Returns the removed row, or `None` if `user_id` wasn't a member of
+    this organization. Raises `LastMemberError` if `user_id` is the
+    organization's only remaining member.
+    """
+    organization = (
+        await session.execute(
+            select(Organization)
+            .where(Organization.id == organization_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if organization is None:
+        return None
+
+    member = await get_member(
+        session, organization_id=organization_id, user_id=user_id
+    )
+    if member is None:
+        return None
+
+    count_result = await session.execute(
+        select(func.count())
+        .select_from(OrganizationMember)
+        .where(tenant_filter(OrganizationMember, organization_id=organization_id))
+    )
+    if count_result.scalar_one() <= 1:
+        raise LastMemberError()
+
+    await session.delete(member)
+    if organization.created_by == user_id:
+        # The creator no longer belongs to this org -- fall back to the
+        # "any member" rule for rename/lifecycle actions (see
+        # `require_org_admin`) rather than leaving the org permanently
+        # un-renameable because its recorded creator is gone.
+        organization.created_by = None
+    await session.flush()
+    return member
 
 
 async def list_user_organizations(
