@@ -184,7 +184,7 @@ async def login(
         user_id=user.id,
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
-        client=body.client.value,
+        client=body.client,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
@@ -265,7 +265,19 @@ async def refresh(
         # -- it's just an ordinary "please log in again".
         raise HTTPException(status_code=401, detail="Refresh token expired")
 
-    client = ClientType(token_row.client)
+    try:
+        client = ClientType(token_row.client)
+    except ValueError:
+        # The stored `client` isn't one of ClientType's values -- data
+        # that should be unreachable through this app's own code paths
+        # (store_refresh_token only ever accepts a ClientType), so
+        # treat it the same as the other "this session can't be
+        # trusted" cases above: fail closed with a 401 and revoke the
+        # family, rather than let an unhandled ValueError surface as a
+        # 500. See the round-2 Copilot review on PR #75.
+        await revoke_refresh_token_family(session, token_row.family_id)
+        await block_family_tokens(str(token_row.family_id))
+        raise HTTPException(status_code=401, detail="Refresh token invalid")
 
     # The absolute timeout: a session ends this long after the
     # *original* login, however active it's been, measured from
@@ -302,7 +314,7 @@ async def refresh(
         family_created_at=token_row.family_created_at,
         token_hash=hash_refresh_token(new_refresh),
         expires_at=new_expires_at,
-        client=token_row.client,
+        client=client,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )

@@ -174,6 +174,37 @@ async def test_web_session_used_regularly_stays_valid_past_the_old_7_day_limit(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_refresh_fails_closed_on_a_corrupted_client_value(
+    client: AsyncClient, session: AsyncSession
+) -> None:
+    """A `refresh_tokens.client` value that isn't one of ClientType's
+    members (manually-edited data, a bad migration, corruption -- never
+    something this app's own code writes) must reject the refresh with
+    a 401 and revoke the family, the same way every other "this session
+    can't be trusted" case in this endpoint does -- not an unhandled
+    ValueError surfacing as a 500. See the round-2 Copilot review on
+    PR #75."""
+    email = "corrupted-client@example.com"
+    _, refresh_token = await _login_pair(client, email)
+
+    token_row = await _only_token_row(session, email)
+    token_row.client = "bogus"
+    await session.flush()
+
+    response = await client.post(
+        "/v1/auth/refresh", json={"refresh_token": refresh_token}
+    )
+    assert response.status_code == 401
+
+    # The family is revoked outright, not just this one request
+    # rejected.
+    replay = await client.post(
+        "/v1/auth/refresh", json={"refresh_token": refresh_token}
+    )
+    assert replay.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_new_login_starts_a_fresh_family_created_at(
     client: AsyncClient, session: AsyncSession
 ) -> None:

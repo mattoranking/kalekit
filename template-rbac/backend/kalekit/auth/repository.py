@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.client_type import ClientType
 from kalekit.auth.service import hash_password
 from kalekit.models.email_verification_token import EmailVerificationToken
 from kalekit.models.refresh_token import RefreshToken
@@ -105,7 +106,7 @@ async def store_refresh_token(
     user_id: uuid.UUID,
     token_hash: str,
     expires_at: datetime,
-    client: str,
+    client: ClientType,
     family_id: uuid.UUID | None = None,
     family_created_at: datetime | None = None,
     device_info: str | None = None,
@@ -123,12 +124,19 @@ async def store_refresh_token(
     RefreshToken.family_created_at) and must never move. Omit it only
     when starting a brand-new family, where the column default ("now")
     is correct.
+
+    `client` is a `ClientType`, not a raw string -- the DB column is a
+    plain String (see RefreshToken.client), but taking a validated enum
+    here rather than `str` makes "only a real client value ever reaches
+    the DB" a property of this function's signature instead of
+    something every caller has to remember to uphold. See #6 and the
+    round-2 Copilot review on PR #75.
     """
     token = RefreshToken(
         user_id=user_id,
         token_hash=token_hash,
         expires_at=expires_at,
-        client=client,
+        client=client.value,
         device_info=device_info,
         ip_address=ip_address,
         **({"family_id": family_id} if family_id is not None else {}),
