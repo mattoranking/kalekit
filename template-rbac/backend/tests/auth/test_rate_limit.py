@@ -156,6 +156,41 @@ async def test_account_lockout_recovers_when_its_redis_key_loses_its_ttl(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_an_oversized_email_still_gets_rate_limited(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test (round-2 Copilot finding on PR #88): LoginRequest
+    .email has no length cap, so an oversized value must still be
+    throttled -- via a hashed key (see bounded_identifier) rather than
+    the raw string blowing up Redis key size."""
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_ACCOUNT", 1)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_IP", 1000)
+
+    huge_email = "a" * 10_000 + "@example.com"
+
+    fail = await client.post(
+        "/v1/auth/login",
+        json={"email": huge_email, "password": "whatever"},
+    )
+    assert fail.status_code == 401
+
+    blocked = await client.post(
+        "/v1/auth/login",
+        json={"email": huge_email, "password": "whatever"},
+    )
+    assert blocked.status_code == 429
+
+    from kalekit.auth.permissions import get_redis
+    from kalekit.utils.rate_limit import bounded_identifier
+
+    r = await get_redis()
+    hashed_key = f"login_rate:account:{bounded_identifier(huge_email.lower())}"
+    assert len(hashed_key) < 200
+    assert await r.get(hashed_key) is not None
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_login_is_also_rate_limited_per_ip(
     client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
 ) -> None:

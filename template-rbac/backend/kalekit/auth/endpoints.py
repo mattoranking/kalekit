@@ -69,7 +69,11 @@ from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.utils.email import send_verification_email
-from kalekit.utils.rate_limit import check_and_increment, get_client_ip
+from kalekit.utils.rate_limit import (
+    bounded_identifier,
+    check_and_increment,
+    get_client_ip,
+)
 
 router = APIRouter(
     prefix="/auth",
@@ -179,7 +183,7 @@ async def login(
     # so the lowercasing here is purely to keep this counter from being
     # split across multiple keys by a caller who varies casing between
     # requests targeting the same account.)
-    account_key = f"login_rate:account:{body.email.lower()}"
+    account_key = f"login_rate:account:{bounded_identifier(body.email.lower())}"
     if settings.RATE_LIMIT_ENABLED:
         r = await get_redis()
         ip_key = f"login_rate:ip:{get_client_ip(request)}"
