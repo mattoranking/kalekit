@@ -1,11 +1,13 @@
 import uuid
 from collections.abc import AsyncGenerator, Callable
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
 from kalekit.auth.repository import create_user, find_user_by_email
-from kalekit.cli import build_parser, create_admin
+from kalekit.cli import build_parser, create_admin, generate_secret
+from kalekit.config import MIN_JWT_SECRET_KEY_BYTES
 from kalekit.postgres import create_async_engine
 from kalekit.utils.db.database import create_async_sessionmaker
 
@@ -141,3 +143,72 @@ def test_create_admin_parser_password_is_optional() -> None:
     assert args.command == "create-admin"
     assert args.email == "a@example.com"
     assert args.password is None
+
+
+def test_generate_secret_parser_defaults_to_printing() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["generate-secret"])
+
+    assert args.command == "generate-secret"
+    assert args.write_to is None
+
+
+def test_generate_secret_parser_write_defaults_to_dot_env() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["generate-secret", "--write"])
+
+    assert args.write_to == ".env"
+
+
+def test_generate_secret_parser_write_accepts_explicit_path() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["generate-secret", "--write", "backend/.env"])
+
+    assert args.write_to == "backend/.env"
+
+
+def test_generate_secret_prints_a_strong_secret(capsys: pytest.CaptureFixture) -> None:
+    generate_secret(None)
+
+    printed = capsys.readouterr().out.strip()
+
+    assert len(printed.encode("utf-8")) >= MIN_JWT_SECRET_KEY_BYTES
+    # Each call must be unique -- this is meant to feed a real secret.
+    generate_secret(None)
+    assert capsys.readouterr().out.strip() != printed
+
+
+def test_generate_secret_writes_new_env_file(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+
+    generate_secret(str(env_path))
+
+    contents = env_path.read_text()
+    lines = [
+        line
+        for line in contents.splitlines()
+        if line.startswith("KALEKIT_JWT_SECRET_KEY=")
+    ]
+    assert len(lines) == 1
+    secret = lines[0].split("=", 1)[1]
+    assert len(secret.encode("utf-8")) >= MIN_JWT_SECRET_KEY_BYTES
+
+
+def test_generate_secret_replaces_existing_line_in_place(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "KALEKIT_ENV=production\n"
+        "KALEKIT_JWT_SECRET_KEY=change-me-in-production\n"
+        "KALEKIT_CORS_ORIGINS=https://example.com\n"
+    )
+
+    generate_secret(str(env_path))
+
+    lines = env_path.read_text().splitlines()
+    assert lines[0] == "KALEKIT_ENV=production"
+    assert lines[1].startswith("KALEKIT_JWT_SECRET_KEY=")
+    assert "change-me-in-production" not in lines[1]
+    assert lines[2] == "KALEKIT_CORS_ORIGINS=https://example.com"

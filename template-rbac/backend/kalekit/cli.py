@@ -12,11 +12,19 @@ band by whoever operates the deployment, e.g.:
 If a user with that email already exists (password or OAuth signup),
 they're promoted in place. Otherwise --password is required and a new,
 pre-verified password-login user is created directly as admin.
+
+Also provides `generate-secret`, for producing a strong KALEKIT_JWT_SECRET_KEY
+(config.py refuses to start outside development/testing without one):
+
+    uv run python -m kalekit.cli generate-secret
+    uv run python -m kalekit.cli generate-secret --write .env
 """
 
 import argparse
 import asyncio
+import secrets
 import sys
+from pathlib import Path
 
 import structlog
 
@@ -71,6 +79,43 @@ async def create_admin(email: str, password: str | None) -> None:
         await engine.dispose()
 
 
+def generate_secret(write_to: str | None) -> None:
+    """Print a random JWT secret, or write it into a local .env file.
+
+    Config validation (see kalekit/config.py) refuses to start outside
+    development/testing with a default or under-32-byte
+    KALEKIT_JWT_SECRET_KEY -- this is the tool it points operators at to
+    fix that.
+    """
+    # 64 url-safe chars (48 random bytes), comfortably over the 32-byte
+    # minimum config.py enforces.
+    secret = secrets.token_urlsafe(48)
+
+    if write_to is None:
+        print(secret)
+        return
+
+    path = Path(write_to)
+    line = f"KALEKIT_JWT_SECRET_KEY={secret}\n"
+
+    lines = (
+        path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if path.exists()
+        else []
+    )
+    for i, existing in enumerate(lines):
+        if existing.startswith("KALEKIT_JWT_SECRET_KEY="):
+            lines[i] = line
+            break
+    else:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(line)
+
+    path.write_text("".join(lines), encoding="utf-8")
+    print(f"Wrote a new KALEKIT_JWT_SECRET_KEY to {path}.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m kalekit.cli",
@@ -95,6 +140,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    generate_secret_parser = subparsers.add_parser(
+        "generate-secret",
+        help="Generate a random JWT secret (prints it, or writes it to a .env file).",
+    )
+    generate_secret_parser.add_argument(
+        "--write",
+        dest="write_to",
+        nargs="?",
+        const=".env",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write (or replace) KALEKIT_JWT_SECRET_KEY in this file instead "
+            "of printing the secret. Defaults to ./.env if given with no "
+            "value."
+        ),
+    )
+
     return parser
 
 
@@ -104,6 +167,8 @@ def main() -> None:
 
     if args.command == "create-admin":
         asyncio.run(create_admin(args.email, args.password))
+    elif args.command == "generate-secret":
+        generate_secret(args.write_to)
 
 
 if __name__ == "__main__":
