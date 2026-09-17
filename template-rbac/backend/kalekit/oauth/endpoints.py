@@ -169,7 +169,16 @@ async def oauth_callback(
     # `.get` with a "web" fallback so state minted by an authorize call
     # from just before this field existed (mid-deploy) still decodes
     # instead of KeyError-ing the callback.
-    client_type = ClientType(state_data.get("client", ClientType.web.value))
+    try:
+        client_type = ClientType(state_data.get("client", ClientType.web.value))
+    except ValueError:
+        # Malformed callback state -- corrupted Redis data, a manual
+        # edit, or a mid-deploy mismatch between an older /authorize
+        # and a newer /callback -- rather than an unhandled ValueError
+        # surfacing as a 500. 400, not 401: this isn't a session/token
+        # being rejected, it's a bad callback request, same as the
+        # provider/state mismatch check just below.
+        raise HTTPException(status_code=400, detail="Invalid client in OAuth state")
 
     if stored_provider != provider:
         raise HTTPException(status_code=400, detail="State/provider mismatch")

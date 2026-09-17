@@ -1,9 +1,11 @@
+import json
 from urllib.parse import parse_qs, urlsplit
 
 import jwt
 import pytest
 from httpx import AsyncClient
 
+from kalekit.auth.permissions import get_redis
 from kalekit.auth.repository import get_refresh_token_by_hash
 from kalekit.auth.service import hash_refresh_token
 from kalekit.config import settings
@@ -233,6 +235,37 @@ async def test_callback_rejects_invalid_state(client: AsyncClient) -> None:
     response = await client.get(
         "/v1/oauth/github/callback",
         params={"code": "provider-code", "state": "bogus-state"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_callback_rejects_state_with_a_corrupted_client(
+    client: AsyncClient,
+) -> None:
+    """A `client` value in the Redis-stored OAuth state that isn't one
+    of ClientType's members -- corrupted state, a manual edit, or a
+    mid-deploy mismatch between an older /authorize and a newer
+    /callback -- must be rejected with a 400, not surface as an
+    unhandled ValueError (500). Same bug class, same fix pattern, as
+    the corrupted `refresh_tokens.client` case in
+    tests/auth/test_session_lifetime.py. See the round-3 Copilot
+    review on PR #75."""
+    state = await _prime_state(client)
+
+    r = await get_redis()
+    state_key = f"oauth_state:{state}"
+    raw_state_data = await r.get(state_key)
+    assert raw_state_data is not None
+    state_data = json.loads(raw_state_data)
+    state_data["client"] = "not-a-real-client"
+    await r.set(state_key, json.dumps(state_data), ex=600)
+
+    response = await client.get(
+        "/v1/oauth/github/callback",
+        params={"code": "provider-code", "state": state},
         follow_redirects=False,
     )
 
