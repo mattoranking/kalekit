@@ -153,9 +153,11 @@ async def change_member_role(
     decision inside one consistently-ordered critical section.
 
     Raises `LastOwnerError` if `user_id` is currently the sole owner
-    and `role` is anything other than `owner` -- this covers both an
-    admin demoting the last owner and the last owner demoting
-    themselves.
+    and `role` is anything other than `owner` -- in practice this is
+    only reachable for the last owner demoting themselves, since an
+    admin can never pass the `NotPermittedError` check above against
+    an owner target (admins hold no `members:grant:owner`) to reach
+    this check at all.
 
     Returns the updated row, or `None` if `user_id` isn't a member of
     this organization.
@@ -208,10 +210,13 @@ async def remove_member(
     `NotPermittedError` if the check fails.
 
     Raises `LastOwnerError` if `user_id` is currently the organization's
-    sole owner -- covers both an admin removing the last owner and the
-    last owner removing/leaving themselves. (Removing the last
-    *member* overall, when that member isn't the/an owner, is out of
-    scope for issue #30 -- only last-owner protection was asked for.)
+    sole owner -- in practice this is only reachable for the last owner
+    removing/leaving themselves (or another owner removing them), since
+    an admin can never pass the `NotPermittedError` check above against
+    an owner target (admins hold no `members:grant:owner`) to reach
+    this check at all. (Removing the last *member* overall, when that
+    member isn't the/an owner, is out of scope for issue #30 -- only
+    last-owner protection was asked for.)
 
     Returns the removed row, or `None` if `user_id` wasn't a member of
     this organization.
