@@ -131,7 +131,7 @@ async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
     if cached is None:
         return None
     try:
-        return json.loads(cached)
+        decoded = json.loads(cached)
     except (TypeError, ValueError):
         # Corrupt/unexpected cached value -- treat it the same as a
         # miss rather than letting the JSONDecodeError propagate and
@@ -142,3 +142,21 @@ async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
         # family.
         logger.warning("refresh_grace_cache_value_corrupt")
         return None
+
+    if (
+        not isinstance(decoded, dict)
+        or not isinstance(decoded.get("access_token"), str)
+        or not isinstance(decoded.get("refresh_token"), str)
+    ):
+        # Valid JSON, but not the TokenResponse shape this cache is
+        # only ever supposed to hold (e.g. a JSON list, or a dict
+        # missing/mistyping the required fields) -- the caller does
+        # `TokenResponse(**cached)` on whatever this returns, which
+        # would raise a pydantic ValidationError (-> 500) instead of
+        # the intended fail-closed 401 for an unreadable cache. Same
+        # reasoning as the JSON-decode failure above: treat it as a
+        # miss.
+        logger.warning("refresh_grace_cache_value_malformed")
+        return None
+
+    return decoded

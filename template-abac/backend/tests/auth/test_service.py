@@ -10,6 +10,8 @@ degrade this gracefully -- not turn an otherwise-successful refresh
 into an unhandled 500. See the round-3 Copilot review on PR #87.
 """
 
+import json
+
 import pytest
 import redis.exceptions
 
@@ -37,6 +39,23 @@ class _CorruptRedis:
 
     async def get(self, *args, **kwargs):
         return "not valid json"
+
+
+class _WrongShapeRedis:
+    """A fake Redis client that returns *valid* JSON, but not the
+    TokenResponse shape (access_token/refresh_token strings) the
+    caller assumes -- e.g. a JSON list."""
+
+    async def get(self, *args, **kwargs):
+        return "[1, 2, 3]"
+
+
+class _MissingFieldRedis:
+    """Valid JSON object, but missing the required `access_token`
+    field -- constructing TokenResponse(**this) would raise."""
+
+    async def get(self, *args, **kwargs):
+        return json.dumps({"refresh_token": "abc", "token_type": "bearer"})
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -85,6 +104,43 @@ async def test_cache_read_treats_a_corrupt_value_as_a_miss(
 
     monkeypatch.setattr(
         "kalekit.auth.service.get_redis", _corrupt_get_redis
+    )
+
+    result = await get_cached_refresh_grace_pair("some-hash")
+
+    assert result is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cache_read_treats_a_non_dict_value_as_a_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Valid JSON that isn't the TokenResponse shape (a list, here)
+    must not be handed back to the caller as-is -- `TokenResponse(
+    **cached)` on a list would raise, turning this into a 500 instead
+    of the intended fail-closed 401 for an unreadable cache."""
+
+    async def _wrong_shape_get_redis():
+        return _WrongShapeRedis()
+
+    monkeypatch.setattr(
+        "kalekit.auth.service.get_redis", _wrong_shape_get_redis
+    )
+
+    result = await get_cached_refresh_grace_pair("some-hash")
+
+    assert result is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_cache_read_treats_a_dict_missing_required_fields_as_a_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _missing_field_get_redis():
+        return _MissingFieldRedis()
+
+    monkeypatch.setattr(
+        "kalekit.auth.service.get_redis", _missing_field_get_redis
     )
 
     result = await get_cached_refresh_grace_pair("some-hash")
