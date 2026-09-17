@@ -90,3 +90,37 @@ async def require_org_creator(
             status_code=403, detail="Only the organization creator can invite members"
         )
     return organization
+
+
+async def require_org_admin(
+    organization_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Organization:
+    """Rename / remove-member gate (issue #25): the org's creator, or
+    any member if the org has no recorded creator -- e.g. the creator
+    has since left or been removed (see `remove_member`), or a future
+    system-seeded organization that was never given one.
+
+    Same 404-for-non-member as `require_org_member` -- the org doesn't
+    exist for them. 403 for a member who isn't the creator of an org
+    that still has one.
+    """
+    result = await session.execute(
+        select(OrganizationMember).where(
+            tenant_filter(OrganizationMember, organization_id=organization_id),
+            OrganizationMember.user_id == user.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    organization = await session.get(Organization, organization_id)
+    if organization is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    if organization.created_by is not None and organization.created_by != user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the organization creator can perform this action",
+        )
+    return organization
