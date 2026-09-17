@@ -9,6 +9,7 @@ from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
 from pwdlib.hashers.bcrypt import BcryptHasher
 
+from kalekit.auth.client_type import ClientType
 from kalekit.config import settings
 
 # Argon2 is the preferred scheme for new hashes (per current FastAPI
@@ -87,10 +88,11 @@ def verification_token_expiry() -> datetime:
 def create_access_token(
     user_id: str,
     scopes: list[str],
+    client: ClientType = ClientType.web,
     session_id: str | None = None,
 ) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
-        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        minutes=settings.access_token_expire_minutes(client)
     )
     payload: dict[str, Any] = {
         "sub": user_id,
@@ -98,7 +100,12 @@ def create_access_token(
         "scopes": scopes,
         "type": "access",
         "exp": expire,
-        "aud": settings.JWT_AUDIENCE,
+        # Which client this token was minted for -- see
+        # kalekit.auth.client_type.ClientType and #6. Pinning it (rather
+        # than a single fixed audience) is what lets admin-only routes
+        # (require_admin_client) reject a token minted for web/mobile
+        # even when its baked-in scopes include admin permissions.
+        "aud": client.value,
     }
     # `session_id` is the refresh token family this access token was
     # minted from (see kalekit.auth.repository.store_refresh_token /
@@ -123,7 +130,7 @@ def create_access_token(
     )
 
 
-def generate_refresh_token() -> tuple[str, datetime]:
+def generate_refresh_token(client: ClientType = ClientType.web) -> tuple[str, datetime]:
     """Returns (raw_token, expires_at).
 
     Refresh tokens are opaque `secrets.token_urlsafe` values, not JWTs.
@@ -133,11 +140,16 @@ def generate_refresh_token() -> tuple[str, datetime]:
     what lets /auth/refresh actually validate against the DB (checking
     revocation, rotation, and reuse) instead of only checking a
     signature and expiry. See hash_refresh_token below.
+
+    `expires_at` is the sliding *idle* timeout for `client` (see
+    kalekit.config.Settings.session_idle_timeout) -- every successful
+    refresh calls this again and gets a fresh idle deadline, so an
+    actively-used session never hits it. It's independent of the
+    session's absolute timeout, which is enforced separately against
+    RefreshToken.family_created_at (see #6).
     """
     token = secrets.token_urlsafe(32)
-    expire = datetime.now(timezone.utc) + timedelta(
-        days=settings.REFRESH_TOKEN_EXPIRE_DAYS
-    )
+    expire = datetime.now(timezone.utc) + settings.session_idle_timeout(client)
     return token, expire
 
 

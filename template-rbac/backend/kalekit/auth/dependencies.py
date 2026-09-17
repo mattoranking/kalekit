@@ -5,7 +5,9 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.client_type import ClientType
 from kalekit.auth.permissions import (
+    get_scopes_for_roles,
     is_family_blocked,
     is_token_blocked,
     is_user_blocked,
@@ -15,6 +17,13 @@ from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 
 bearer_scheme = HTTPBearer()
+
+# Every access token's `aud` claim must be one of these -- accepting any
+# valid ClientType (rather than one fixed audience) is what lets a
+# single signing key issue tokens for web, mobile, and admin while
+# still rejecting a token minted for one client from being used as if
+# it were minted for another (see require_admin_client below, and #6).
+_VALID_AUDIENCES = [c.value for c in ClientType]
 
 
 def _signing_key_for_kid(kid: Any) -> str | None:
@@ -55,7 +64,7 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
             # `alg` the token claims) is what closes the classic
             # "alg: none" / algorithm-confusion JWT attacks.
             algorithms=[settings.JWT_ALGORITHM],
-            audience=settings.JWT_AUDIENCE,
+            audience=_VALID_AUDIENCES,
             leeway=settings.JWT_LEEWAY_SECONDS,
             options={"require": ["exp", "aud"]},
         )
@@ -64,6 +73,22 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
 
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type")
+
+    # The JWT spec (and PyJWT) allows `aud` to be either a single string
+    # or a list of strings; jwt.decode's `audience=_VALID_AUDIENCES`
+    # check above accepts a token whose `aud` is a *list* as long as
+    # one entry matches, and hands it back as-is -- i.e. `payload["aud"]`
+    # could come back as e.g. `["web", "mobile"]` rather than "web".
+    # This app never mints multi-audience tokens (create_access_token
+    # always sets `aud` to a single client string), so reject that
+    # shape here, at the one place every caller's token gets decoded,
+    # rather than needing get_current_client and everything else that
+    # reads `aud` to separately guard against it -- otherwise
+    # `ClientType(payload["aud"])` downstream raises on the unhashable
+    # list and surfaces as an unhandled 500 instead of failing closed.
+    if not isinstance(payload.get("aud"), str):
+        raise HTTPException(status_code=401, detail="Invalid token audience")
+
     return payload
 
 
@@ -94,17 +119,29 @@ async def get_current_scopes(
 ) -> set[str]:
     """The permission set baked into the token at login/refresh.
 
-    Reading it straight from the token (instead of re-resolving the
-    user's roles against Redis/the DB on every request) trades a
-    small staleness window -- a role change takes effect on the
-    token's next refresh, not instantly -- for removing a cache/DB
-    round trip from every permission check. See get_current_user for
-    the escape hatch when a permission needs to be pulled immediately:
-    block_token/block_all_user_tokens force the token to be re-issued
-    (and its scopes re-resolved) before its natural expiry.
+    This is a convenience snapshot only -- e.g. for a frontend's own
+    cheap edge checks (a Next.js middleware redirect) that can tolerate
+    staleness up to whatever access-token lifetime applies to the
+    caller's client (see Settings.access_token_expire_minutes). It is NOT the
+    authority for backend authorization: `require_permission` below
+    re-resolves the caller's permissions live against the Redis role
+    cache on every request instead of trusting these baked-in scopes,
+    so a role/permission change takes effect on the very next request
+    rather than only once the token is refreshed (see #6).
     """
     payload = _decode_access_token(credentials)
     return set(payload.get("scopes", []))
+
+
+async def get_current_client(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> ClientType:
+    """Which client (web/mobile/admin) minted the current access token,
+    from its `aud` claim. Decoding already restricts `aud` to one of
+    ClientType's values (see _VALID_AUDIENCES), so this always
+    succeeds for any token that reaches here."""
+    payload = _decode_access_token(credentials)
+    return ClientType(payload["aud"])
 
 
 async def get_current_jti(
@@ -140,12 +177,28 @@ async def require_verified_email(
 
 
 def require_permission(permission: str):
-    """Dependency factory for RBAC checks."""
+    """Dependency factory for RBAC checks.
+
+    Resolves the caller's permissions live against the Redis-cached
+    role lookup (get_scopes_for_roles) on every call, using the roles
+    `get_current_user` just loaded fresh from the database -- it does
+    NOT trust the access token's baked-in `scopes` claim. Since
+    get_current_user already re-fetches the user (and its roles) from
+    the DB on every request, the token's scopes bought no real caching
+    benefit, only staleness: a revoked role would otherwise keep
+    working for up to whatever access-token lifetime applies to that
+    client (see Settings.access_token_expire_minutes). Resolving live here
+    means a role or permission change applies on the very next request,
+    for every client, with only the Redis role-cache TTL
+    (ROLE_CACHE_TTL_SECONDS) as the remaining delay. See #6.
+    """
 
     async def checker(
         user: Annotated[User, Depends(get_current_user)],
-        scopes: Annotated[set[str], Depends(get_current_scopes)],
+        session: Annotated[AsyncSession, Depends(get_db_session)],
     ) -> User:
+        roles = [ur.role.name for ur in user.roles]
+        scopes = await get_scopes_for_roles(session, roles)
         if permission not in scopes:
             raise HTTPException(
                 status_code=403,
@@ -154,3 +207,21 @@ def require_permission(permission: str):
         return user
 
     return checker
+
+
+async def require_admin_client(
+    client: Annotated[ClientType, Depends(get_current_client)],
+) -> None:
+    """Reject any access token whose `aud` isn't `admin`, regardless of
+    the permissions baked into its scopes.
+
+    This is what actually separates the back office from the product:
+    a user who holds the admin role but signed into the consumer
+    web/mobile app gets a token with `aud="web"`/`"mobile"` (see
+    create_access_token) that `require_permission("admin:*")` alone
+    would still accept -- this dependency additionally requires the
+    token to have been minted by the admin client itself. Compose it
+    alongside `require_permission` on admin-only routes. See #6.
+    """
+    if client is not ClientType.admin:
+        raise HTTPException(status_code=403, detail="Admin client required")

@@ -28,6 +28,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.client_type import ClientType
 from kalekit.auth.permissions import get_redis, get_scopes_for_roles
 from kalekit.auth.repository import store_refresh_token
 from kalekit.auth.schemas import TokenResponse
@@ -88,6 +89,7 @@ def _is_allowed_redirect(url: str) -> bool:
 async def oauth_authorize(
     provider: str,
     redirect_to: Annotated[str | None, Query()] = None,
+    client_type: Annotated[ClientType, Query(alias="client")] = ClientType.web,
 ):
     """Generate an authorization URL and return it to the frontend.
 
@@ -98,24 +100,30 @@ async def oauth_authorize(
     browser after login completes -- validated against the allowlist
     now (fail fast) rather than only at callback time, and carried
     through Redis alongside the CSRF state.
+
+    `client` is which app this OAuth sign-in is for (web/mobile/admin
+    -- see #6); validated here (an unknown value 422s) and carried
+    through Redis the same way `redirect_to` is, since the callback --
+    not this endpoint -- is what actually mints the token pair.
     """
-    client = _get_provider(provider)
+    provider_client = _get_provider(provider)
     state = secrets.token_urlsafe(32)
 
     target = redirect_to or settings.FRONTEND_URL
     if not _is_allowed_redirect(target):
         raise HTTPException(status_code=400, detail="Redirect target not allowed")
 
-    authorization_url, code_verifier = client.get_authorization_url(state)
+    authorization_url, code_verifier = provider_client.get_authorization_url(state)
 
-    # Store state (and code_verifier for PKCE, and the post-login
-    # redirect target) in Redis
+    # Store state (and code_verifier for PKCE, the post-login redirect
+    # target, and the requesting client) in Redis
     r = await get_redis()
     state_data = json.dumps(
         {
             "provider": provider,
             "code_verifier": code_verifier,
             "redirect_to": target,
+            "client": client_type.value,
         }
     )
     await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
@@ -158,6 +166,19 @@ async def oauth_callback(
     stored_provider = state_data["provider"]
     code_verifier: str | None = state_data.get("code_verifier")
     redirect_to: str = state_data["redirect_to"]
+    # `.get` with a "web" fallback so state minted by an authorize call
+    # from just before this field existed (mid-deploy) still decodes
+    # instead of KeyError-ing the callback.
+    try:
+        client_type = ClientType(state_data.get("client", ClientType.web.value))
+    except ValueError:
+        # Malformed callback state -- corrupted Redis data, a manual
+        # edit, or a mid-deploy mismatch between an older /authorize
+        # and a newer /callback -- rather than an unhandled ValueError
+        # surfacing as a 500. 400, not 401: this isn't a session/token
+        # being rejected, it's a bad callback request, same as the
+        # provider/state mismatch check just below.
+        raise HTTPException(status_code=400, detail="Invalid client in OAuth state")
 
     if stored_provider != provider:
         raise HTTPException(status_code=400, detail="State/provider mismatch")
@@ -216,7 +237,7 @@ async def oauth_callback(
     # --- Issue our token pair ---
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
-    refresh_token, expires_at = generate_refresh_token()
+    refresh_token, expires_at = generate_refresh_token(client_type)
 
     # Persist it like /auth/login does -- otherwise /auth/refresh (which
     # now validates against the DB) can never find this token and every
@@ -231,11 +252,15 @@ async def oauth_callback(
         user_id=user.id,
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
+        client=client_type,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
     access_token = create_access_token(
-        str(user.id), list(scopes), session_id=str(token_row.family_id)
+        str(user.id),
+        list(scopes),
+        client=client_type,
+        session_id=str(token_row.family_id),
     )
 
     # --- Hand off to the frontend without tokens in the URL ---

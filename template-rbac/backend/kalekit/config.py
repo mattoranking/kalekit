@@ -1,9 +1,12 @@
 import os
+from datetime import timedelta
 from enum import StrEnum
 from typing import Literal
 
 from pydantic import Field, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from kalekit.auth.client_type import ClientType
 
 type PostgresDriver = Literal["psycopg2", "asyncpg"]
 
@@ -56,17 +59,57 @@ class Settings(BaseSettings):
     # token. Drop an entry once nothing signed under it should still be
     # accepted (e.g. past its max access-token lifetime).
     JWT_PREVIOUS_KEYS: dict[str, str] = Field(default_factory=dict)
-    # Required `aud` claim on access tokens -- pinning it (rather than
-    # accepting any audience) keeps a token minted for one purpose from
-    # being replayed against an API that happens to trust the same
-    # signing key for something else.
-    JWT_AUDIENCE: str = "kalekit-api"
     # Clock-skew tolerance (seconds) applied when checking `exp` during
     # decode, so a slightly-behind server clock doesn't reject
     # otherwise-valid tokens right at their expiry boundary.
     JWT_LEEWAY_SECONDS: int = 30
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    # --- Per-client token policy (see #6) ---
+    #
+    # Every access token's `aud` claim is the client (web/mobile/admin)
+    # it was minted for -- decode() (see auth/dependencies.py) accepts
+    # any of ClientType's values as a valid audience, then
+    # `require_admin_client` narrows individual routes down to exactly
+    # `admin`. This is what stops a web/mobile session -- even one for
+    # a user who holds the admin role -- from being replayed against
+    # admin-only routes: those need a token actually minted by the
+    # admin client, not merely a token whose scopes happen to include
+    # admin permissions.
+    #
+    # Admin sessions get shorter-lived access tokens than the consumer
+    # clients since a compromised admin token is far more dangerous.
+    ACCESS_TOKEN_EXPIRE_MINUTES_WEB: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES_MOBILE: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES_ADMIN: int = 5
+
+    # Sliding session expiration for refresh tokens: every successful
+    # /auth/refresh issues a new refresh token whose `expires_at` is
+    # `now + <client>'s idle timeout`, so an actively-used session never
+    # hits it. See auth/service.py:generate_refresh_token.
+    SESSION_IDLE_TIMEOUT_DAYS_WEB: int = 90
+    SESSION_IDLE_TIMEOUT_DAYS_MOBILE: int = 90
+    SESSION_IDLE_TIMEOUT_MINUTES_ADMIN: int = 30
+
+    # Absolute session lifetime: a session (token family) is forced to
+    # end this long after the *original* login/OAuth exchange, no
+    # matter how active it's been -- measured from
+    # RefreshToken.family_created_at, which rotation carries forward
+    # unchanged (unlike `expires_at`, the idle timeout, which rotation
+    # resets). None means "no absolute cutoff" -- appropriate for
+    # consumer clients, which should keep an active user signed in
+    # indefinitely; the back office stays strict.
+    SESSION_ABSOLUTE_TIMEOUT_DAYS_WEB: int | None = None
+    SESSION_ABSOLUTE_TIMEOUT_DAYS_MOBILE: int | None = None
+    SESSION_ABSOLUTE_TIMEOUT_HOURS_ADMIN: int | None = 12
+
+    # How long a role's resolved permission set is cached in Redis
+    # (auth/permissions.py:get_permissions_for_roles). Kept short: with
+    # `require_permission` now resolving permissions live on every
+    # request instead of trusting the access token's baked-in scopes
+    # (see #6), this TTL is the only remaining delay between an admin
+    # revoking a role's permission and it actually taking effect.
+    ROLE_CACHE_TTL_SECONDS: int = 60
+
     # How long, after a refresh token is rotated, its immediate
     # predecessor may still be replayed and treated as a legitimate
     # concurrent refresh (returning the same new pair) instead of
@@ -166,6 +209,58 @@ class Settings(BaseSettings):
         env_file=env_file,
         extra="allow",
     )
+
+    def access_token_expire_minutes(self, client: ClientType) -> int:
+        """Access token lifetime for `client`. Admin gets a shorter
+        lifetime than the consumer clients -- see the field docstrings
+        above."""
+        return {
+            ClientType.web: self.ACCESS_TOKEN_EXPIRE_MINUTES_WEB,
+            ClientType.mobile: self.ACCESS_TOKEN_EXPIRE_MINUTES_MOBILE,
+            ClientType.admin: self.ACCESS_TOKEN_EXPIRE_MINUTES_ADMIN,
+        }[client]
+
+    def access_token_max_expire_minutes(self) -> int:
+        """The longest access token lifetime across all clients.
+
+        Used as the default Redis TTL for the token/user/family
+        blocklists (auth/permissions.py) -- those entries just need to
+        outlive whatever access token they're guarding against, and the
+        blocking code path doesn't always know which client minted the
+        token it's blocking. Erring long (rather than per-client) is
+        the safe direction: it never lets a blocked token work again
+        early.
+        """
+        return max(
+            self.ACCESS_TOKEN_EXPIRE_MINUTES_WEB,
+            self.ACCESS_TOKEN_EXPIRE_MINUTES_MOBILE,
+            self.ACCESS_TOKEN_EXPIRE_MINUTES_ADMIN,
+        )
+
+    def session_idle_timeout(self, client: ClientType) -> timedelta:
+        """How long a session may sit unused before its refresh token
+        stops working. Reset on every successful refresh."""
+        if client is ClientType.admin:
+            return timedelta(minutes=self.SESSION_IDLE_TIMEOUT_MINUTES_ADMIN)
+        days = (
+            self.SESSION_IDLE_TIMEOUT_DAYS_WEB
+            if client is ClientType.web
+            else self.SESSION_IDLE_TIMEOUT_DAYS_MOBILE
+        )
+        return timedelta(days=days)
+
+    def session_absolute_timeout(self, client: ClientType) -> timedelta | None:
+        """How long after login a session is forced to end regardless
+        of activity, or None for no cutoff."""
+        if client is ClientType.admin:
+            hours = self.SESSION_ABSOLUTE_TIMEOUT_HOURS_ADMIN
+            return timedelta(hours=hours) if hours is not None else None
+        days = (
+            self.SESSION_ABSOLUTE_TIMEOUT_DAYS_WEB
+            if client is ClientType.web
+            else self.SESSION_ABSOLUTE_TIMEOUT_DAYS_MOBILE
+        )
+        return timedelta(days=days) if days is not None else None
 
     def is_read_replica_configured(self) -> bool:
         return self.POSTGRES_READ_HOST is not None

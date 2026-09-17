@@ -121,9 +121,12 @@ async def register(
 async def login(client: AsyncClient) -> Callable[..., Coroutine[None, None, str]]:
     """login(email, password="password123") -> access token. Asserts success."""
 
-    async def _login(email: str, password: str = "password123") -> str:
+    async def _login(
+        email: str, password: str = "password123", client_type: str = "web"
+    ) -> str:
         response = await client.post(
-            "/v1/auth/login", json={"email": email, "password": password}
+            "/v1/auth/login",
+            json={"email": email, "password": password, "client": client_type},
         )
         assert response.status_code == 200, response.text
         return response.json()["access_token"]

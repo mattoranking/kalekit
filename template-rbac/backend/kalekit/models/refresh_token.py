@@ -20,6 +20,16 @@ class RefreshToken(RecordModel):
     user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
     token_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
 
+    # Which client (web/mobile/admin -- see kalekit.auth.client_type.
+    # ClientType) this token was issued to. Stored as a plain string
+    # rather than a DB enum, matching Scope/Role/Permission elsewhere in
+    # this app; the client_type module is the single source of truth
+    # for which values are valid. Carried forward unchanged on rotation
+    # (a session can't change client mid-flight). See #6.
+    client: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="web", server_default="web"
+    )
+
     # All tokens issued from the same original login/OAuth exchange share a
     # family_id. Rotation carries it forward; reuse of an already-rotated
     # token in the family revokes every token that shares it (see
@@ -41,6 +51,21 @@ class RefreshToken(RecordModel):
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+
+    # The *original* login/OAuth exchange's timestamp for this token's
+    # family -- i.e. the session's absolute start. Every row in a
+    # family carries the same value forward across rotations (unlike
+    # `expires_at`, which slides forward on each refresh); it's what
+    # lets a session be force-ended a fixed time after login regardless
+    # of activity (the "absolute timeout" half of the sliding
+    # expiration policy -- see #6 and
+    # kalekit.config.Settings.session_absolute_timeout). Defaults to
+    # "now" so a brand-new family's first row needs no explicit value;
+    # rotation must pass the predecessor's value through explicitly.
+    family_created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     device_info: Mapped[str | None] = mapped_column(String(255))
     ip_address: Mapped[str | None] = mapped_column(String(45))
