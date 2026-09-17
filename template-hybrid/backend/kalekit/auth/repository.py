@@ -74,6 +74,38 @@ async def get_refresh_token_by_hash(
     return result.scalar_one_or_none()
 
 
+async def lock_refresh_token_by_hash(
+    session: AsyncSession, token_hash: str
+) -> RefreshToken | None:
+    """Same lookup as get_refresh_token_by_hash, but takes a row lock
+    (`SELECT ... FOR UPDATE`) for the duration of the caller's
+    transaction.
+
+    Used only by the /auth/refresh rotation path: without it, two
+    truly concurrent refreshes presenting the same not-yet-rotated
+    token can both read `revoked=False` before either commits, both
+    rotate, and leave two active successor tokens in the family
+    instead of one canonical chain -- the Redis-backed grace window
+    (see cache_refresh_grace_pair) only catches a *replay* of an
+    already-committed rotation, not two rotations racing against the
+    same still-active row. Locking serializes them: the second
+    request's fetch blocks until the first request's transaction
+    ends, then it sees the now-already-rotated row and correctly
+    falls into the grace-window path instead of forking the family.
+    Same pattern as `organization.repository._lock_organization`.
+
+    Other callers of this lookup (e.g. /auth/logout, which only ever
+    revokes -- it never rotates) don't need the lock and keep using
+    the plain get_refresh_token_by_hash above.
+    """
+    result = await session.execute(
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == token_hash)
+        .with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_refresh_token_by_id(
     session: AsyncSession, token_id: uuid.UUID
 ) -> RefreshToken | None:
