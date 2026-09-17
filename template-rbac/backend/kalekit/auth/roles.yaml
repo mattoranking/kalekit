@@ -1,0 +1,29 @@
+# Default roles and permissions seeded into a fresh database.
+#
+# This file is the source of truth for `ensure_default_roles` in
+# `auth/seed.py`. It is read at runtime, not compiled into the app --
+# changing what a role can do means editing this file and redeploying,
+# the same trust model the previous hardcoded-Python version had, but
+# reviewable in a diff without reading Python. Adding a new role does
+# not require touching `seed.py`'s logic, just adding an entry here.
+#
+# There is deliberately no admin UI for this (see design discussion in
+# issue #2): template-rbac is single-tenant, and the team deploying the
+# app is always the sole custodian of what roles exist.
+#
+# Each role has:
+#   description: human-readable, stored on the Role row.
+#   permissions: a list of scope strings from `auth.scope.Scope` (see
+#     SCOPES_SUPPORTED for the currently valid values), or the literal
+#     string "*" meaning "every scope currently supported by the app".
+#     "*" is used for `admin` so a newly-added Scope is automatically
+#     granted to admins without an edit to this file -- matching the
+#     behavior this file replaces.
+
+roles:
+  visitor:
+    description: "Default role for new sign-ups"
+    permissions: []
+  admin:
+    description: "Full access"
+    permissions: ["*"]
