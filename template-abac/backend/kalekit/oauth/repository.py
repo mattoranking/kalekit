@@ -79,7 +79,9 @@ async def find_or_create_oauth_user(
         # otherwise fall back to the same generic default as password
         # signup.
         org_name = f"{display_name}'s workspace" if display_name else "My workspace"
-        organization = await create_organization(session, name=org_name)
+        organization = await create_organization(
+            session, name=org_name, created_by=user.id
+        )
         await add_member(session, organization_id=organization.id, user_id=user.id)
 
     # Link the OAuth account

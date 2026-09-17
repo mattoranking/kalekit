@@ -47,7 +47,9 @@ async def register(
     # default name must never be derived from the email address: that
     # local part becomes visible to anyone later invited to the org.
     org_name = body.organization_name or "My workspace"
-    organization = await create_organization(session, name=org_name)
+    organization = await create_organization(
+        session, name=org_name, created_by=user.id
+    )
     await add_member(session, organization_id=organization.id, user_id=user.id)
 
     return UserResponse(

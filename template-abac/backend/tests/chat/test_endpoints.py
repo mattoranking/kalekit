@@ -46,12 +46,11 @@ async def test_non_member_gets_404_not_403(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_membership_resolves_the_absence(
-    client: AsyncClient, register, login, auth_header, org_id_for
+    client: AsyncClient, register, login, auth_header, org_id_for, add_member
 ) -> None:
     """Same URL, same account -- only org membership changes the result."""
     await register("alice@example.com")
     await register("bob@example.com")
-    token_alice = await login("alice@example.com")
     token_bob = await login("bob@example.com")
     org_a = await org_id_for("alice@example.com")
 
@@ -60,11 +59,7 @@ async def test_membership_resolves_the_absence(
     )
     assert response.status_code == 404
 
-    await client.post(
-        f"/v1/organizations/{org_a}/members",
-        json={"email": "bob@example.com"},
-        headers=auth_header(token_alice),
-    )
+    await add_member(org_a, token_bob, "bob@example.com")
 
     response = await client.get(
         f"/v1/organizations/{org_a}/chat/", headers=auth_header(token_bob)

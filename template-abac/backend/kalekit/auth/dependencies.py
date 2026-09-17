@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.config import settings
-from kalekit.models.organization import OrganizationMember
+from kalekit.models.organization import Organization, OrganizationMember
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.utils.db.tenancy import tenant_filter
@@ -58,3 +58,35 @@ async def require_org_member(
     if result.scalar_one_or_none() is None:
         raise HTTPException(status_code=404, detail="Not found")
     return user
+
+
+async def require_org_creator(
+    organization_id: UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Organization:
+    """Invitation gate (issue #24): flat membership means everyone can
+    read/write an org's data, but growing the tenant is not something
+    membership alone should grant -- otherwise any member could pull
+    arbitrary registered users into the org unilaterally. Only the
+    org's creator may invite new members.
+
+    404 (not 403) for a non-member, same reasoning as `require_org_member`
+    -- the org doesn't exist for them. 403 for a member who isn't the
+    creator -- they can see the org, they just can't grow it.
+    """
+    result = await session.execute(
+        select(OrganizationMember).where(
+            tenant_filter(OrganizationMember, organization_id=organization_id),
+            OrganizationMember.user_id == user.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    organization = await session.get(Organization, organization_id)
+    if organization is None or organization.created_by != user.id:
+        raise HTTPException(
+            status_code=403, detail="Only the organization creator can invite members"
+        )
+    return organization

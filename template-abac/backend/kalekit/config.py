@@ -38,6 +38,19 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # Frontend (used to build links embedded in emails)
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    # Organization invitations
+    INVITATION_TOKEN_EXPIRE_HOURS: int = 72
+    # Fixed-window rate limits on POST /organizations/{id}/invitations,
+    # keyed separately by organization and by the inviting user so one
+    # compromised/careless account in a busy org can't exhaust the other
+    # limit meant to catch it. See issue #24 / RBAC #18.
+    INVITATION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+    INVITATION_RATE_LIMIT_PER_ORG: int = 20
+    INVITATION_RATE_LIMIT_PER_INVITER: int = 10
+
     # Connection pool settings
     DATABASE_POOL_SIZE: int = 5
     DATABASE_SYNC_POOL_SIZE: int = 1

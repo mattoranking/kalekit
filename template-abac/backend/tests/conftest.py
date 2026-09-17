@@ -1,3 +1,4 @@
+import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from typing import Callable, Coroutine
@@ -16,6 +17,12 @@ from kalekit.config import settings
 from kalekit.models import Model  # noqa: F401 -- registers all models
 from kalekit.models.organization import Organization, OrganizationMember
 from kalekit.models.user import User
+from kalekit.organization.repository import create_invitation
+from kalekit.organization.service import (
+    generate_invitation_token,
+    hash_invitation_token,
+    invitation_token_expiry,
+)
 
 
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
@@ -152,6 +159,47 @@ async def org_id_for(
         return str(result.scalar_one())
 
     return _org_id_for
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def add_member(
+    client: AsyncClient,
+    session: AsyncSession,
+    auth_header: Callable[[str], dict[str, str]],
+) -> Callable[..., Coroutine[None, None, None]]:
+    """add_member(organization_id, invitee_token, invitee_email) -> None.
+
+    Gets `invitee_email` into `organization_id` via the real invitation
+    flow: creates the invitation row directly (bypassing the invite
+    endpoint's email delivery, which tests have no way to intercept
+    since only the token's hash is ever persisted -- mirrors how RBAC's
+    tests construct `EmailVerificationToken` rows directly) and accepts
+    it through the actual `/v1/invitations/accept` endpoint, using the
+    organization's own creator as the recorded inviter.
+    """
+
+    async def _add_member(
+        organization_id: str, invitee_token: str, invitee_email: str
+    ) -> None:
+        organization = await session.get(Organization, uuid.UUID(organization_id))
+        assert organization is not None
+        raw_token = generate_invitation_token()
+        await create_invitation(
+            session,
+            organization_id=organization.id,
+            email=invitee_email.lower(),
+            token_hash=hash_invitation_token(raw_token),
+            invited_by=organization.created_by,
+            expires_at=invitation_token_expiry(),
+        )
+        response = await client.post(
+            "/v1/invitations/accept",
+            json={"token": raw_token},
+            headers=auth_header(invitee_token),
+        )
+        assert response.status_code == 201, response.text
+
+    return _add_member
 
 
 @dataclass

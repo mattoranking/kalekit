@@ -6,6 +6,12 @@ concurrent invites of the same user into the same org could both pass the
 "does not exist yet" check and race the insert, leaving the loser with an
 unhandled `IntegrityError` -> 500 instead of the clean 409 the endpoint
 promises. See issue #56.
+
+Direct membership adds went away with issue #24's invitation flow, so
+this now races two concurrent `POST /invitations/accept` calls against
+the *same* invitation token instead of two `POST .../members` calls --
+`add_member`'s check-then-insert is exercised the same way either path
+gets there.
 """
 
 import asyncio
@@ -21,16 +27,24 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from kalekit.auth.repository import create_user
 from kalekit.auth.service import create_access_token
 from kalekit.models.organization import OrganizationMember
-from kalekit.models.user import User
-from kalekit.organization.repository import add_member, create_organization
+from kalekit.organization.repository import (
+    add_member,
+    create_invitation,
+    create_organization,
+)
+from kalekit.organization.service import (
+    generate_invitation_token,
+    hash_invitation_token,
+    invitation_token_expiry,
+)
 
 
-async def _add_member_with_own_session(
-    engine: AsyncEngine, organization_id: str, token: str, email: str
+async def _accept_with_own_session(
+    engine: AsyncEngine, token: str, raw_invitation_token: str
 ) -> Response:
-    """Issue one `POST /organizations/{id}/members` call over its own
-    dedicated AsyncSession (its own DB connection) and its own FastAPI
-    app instance, mirroring how two independent, simultaneous production
+    """Issue one `POST /invitations/accept` call over its own dedicated
+    `AsyncSession` (its own DB connection) and its own FastAPI app
+    instance, mirroring how two independent, simultaneous production
     requests would each get their own per-request session.
 
     Using the shared `client`/`session` fixtures from conftest would
@@ -60,38 +74,53 @@ async def _add_member_with_own_session(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.post(
-            f"/v1/organizations/{organization_id}/members",
-            json={"email": email},
+            "/v1/invitations/accept",
+            json={"token": raw_invitation_token},
             headers={"Authorization": f"Bearer {token}"},
         )
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_reinviting_existing_member_returns_409(
-    client, register, login, auth_header, org_id_for
+async def test_reaccepting_a_consumed_invitation_returns_400(
+    client,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
 ) -> None:
-    """Sequential duplicate invite: the second call must be rejected, and
-    the roster must still show exactly the two original members -- no
-    second row created."""
+    """Sequential duplicate accept: the second call against the *same*
+    token must be rejected (single-use), and the roster must still show
+    exactly the two original members -- no second row created."""
     await register("owner@example.com")
     await register("member@example.com")
     token_owner = await login("owner@example.com")
+    token_member = await login("member@example.com")
     org = await org_id_for("owner@example.com")
 
+    raw_token = generate_invitation_token()
+    await create_invitation(
+        session,
+        organization_id=uuid.UUID(org),
+        email="member@example.com",
+        token_hash=hash_invitation_token(raw_token),
+        invited_by=None,
+        expires_at=invitation_token_expiry(),
+    )
+
     first = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "member@example.com"},
-        headers=auth_header(token_owner),
+        "/v1/invitations/accept",
+        json={"token": raw_token},
+        headers=auth_header(token_member),
     )
     assert first.status_code == 201
 
     second = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "member@example.com"},
-        headers=auth_header(token_owner),
+        "/v1/invitations/accept",
+        json={"token": raw_token},
+        headers=auth_header(token_member),
     )
-
-    assert second.status_code == 409
+    assert second.status_code == 400
 
     roster = await client.get(
         f"/v1/organizations/{org}/members", headers=auth_header(token_owner)
@@ -100,11 +129,12 @@ async def test_reinviting_existing_member_returns_409(
 
 
 @pytest_asyncio.fixture(loop_scope="session")
-async def committed_owner_org_and_invitee(
+async def committed_owner_org_and_invitation(
     engine: AsyncEngine,
 ) -> tuple[str, str, str]:
     """An organization (with a committed owner membership) plus a second,
-    not-yet-a-member user -- all committed on their own session.
+    not-yet-a-member user and a valid, committed invitation for them --
+    all committed on their own session.
 
     The race test below spins up independent `AsyncSession`s of its own
     (their own DB connections) to exercise a real concurrent insert. Those
@@ -113,34 +143,48 @@ async def committed_owner_org_and_invitee(
     rolled back for test isolation) -- so this fixture commits its setup
     for real instead.
 
-    Returns `(organization_id, owner_access_token, invitee_email)`.
+    Returns `(invitee_access_token, raw_invitation_token, organization_id)`.
     """
     async with AsyncSession(engine, expire_on_commit=False) as setup_session:
         owner = await create_user(
             setup_session, "race-owner@example.com", "password123"
         )
-        organization = await create_organization(setup_session, name="Race Co")
+        organization = await create_organization(
+            setup_session, name="Race Co", created_by=owner.id
+        )
         await add_member(
             setup_session, organization_id=organization.id, user_id=owner.id
         )
-        await create_user(setup_session, "race-member@example.com", "password123")
+        invitee = await create_user(
+            setup_session, "race-member@example.com", "password123"
+        )
+        raw_token = generate_invitation_token()
+        await create_invitation(
+            setup_session,
+            organization_id=organization.id,
+            email="race-member@example.com",
+            token_hash=hash_invitation_token(raw_token),
+            invited_by=owner.id,
+            expires_at=invitation_token_expiry(),
+        )
         await setup_session.commit()
         return (
+            create_access_token(str(invitee.id)),
+            raw_token,
             str(organization.id),
-            create_access_token(str(owner.id)),
-            "race-member@example.com",
         )
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_concurrent_invites_race_exactly_one_wins(
+async def test_concurrent_accepts_race_exactly_one_wins(
     engine: AsyncEngine,
-    committed_owner_org_and_invitee: tuple[str, str, str],
+    committed_owner_org_and_invitation: tuple[str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two truly concurrent invites of the same user, each on its own
-    connection/session/transaction (a real race, not two calls sharing
-    one AsyncSession, which SQLAlchemy would refuse to interleave).
+    """Two truly concurrent accepts of the *same* invitation token, each
+    on its own connection/session/transaction (a real race, not two
+    calls sharing one AsyncSession, which SQLAlchemy would refuse to
+    interleave).
 
     An `asyncio.Barrier(2)` pins both requests to the same instant right
     before they hit the endpoint. That alone isn't enough to reliably
@@ -159,11 +203,11 @@ async def test_concurrent_invites_race_exactly_one_wins(
     criteria in #56 calls for.
 
     Before the fix, the losing coroutine surfaced its `IntegrityError` as
-    an unhandled 500 instead of a clean 409. After the fix, exactly one
-    call gets 201 and the other 409, and the DB ends up with exactly one
-    membership row.
+    an unhandled 500 instead of a clean 409/400. After the fix, exactly
+    one call gets 201 and the other a rejection, and the DB ends up with
+    exactly one new membership row.
     """
-    org, token_owner, invitee_email = committed_owner_org_and_invitee
+    token_invitee, raw_token, org = committed_owner_org_and_invitation
 
     import kalekit.organization.repository as org_repository
 
@@ -189,13 +233,11 @@ async def test_concurrent_invites_race_exactly_one_wins(
 
     request_barrier = asyncio.Barrier(2)
 
-    async def _invite() -> Response:
+    async def _accept() -> Response:
         await request_barrier.wait()
-        return await _add_member_with_own_session(
-            engine, org, token_owner, invitee_email
-        )
+        return await _accept_with_own_session(engine, token_invitee, raw_token)
 
-    response_a, response_b = await asyncio.gather(_invite(), _invite())
+    response_a, response_b = await asyncio.gather(_accept(), _accept())
 
     statuses = sorted([response_a.status_code, response_b.status_code])
     assert statuses == [201, 409], (
@@ -203,43 +245,10 @@ async def test_concurrent_invites_race_exactly_one_wins(
         f"(bodies: {response_a.text!r}, {response_b.text!r})"
     )
 
-    async with AsyncSession(engine) as verify_session:
-        count = await verify_session.scalar(
+    async with AsyncSession(engine, expire_on_commit=False) as verify_session:
+        result = await verify_session.execute(
             select(func.count())
             .select_from(OrganizationMember)
-            .where(
-                OrganizationMember.organization_id == uuid.UUID(org),
-                OrganizationMember.user_id.in_(
-                    select(User.id).where(User.email == invitee_email)
-                ),
-            )
+            .where(OrganizationMember.organization_id == uuid.UUID(org))
         )
-        assert count == 1
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_non_duplicated_member_still_works_normally(
-    client, register, login, auth_header, org_id_for
-) -> None:
-    """Regression: a user with exactly one membership row keeps working
-    normally end-to-end through the endpoint."""
-    await register("owner@example.com")
-    await register("member@example.com")
-    token_owner = await login("owner@example.com")
-    token_member = await login("member@example.com")
-    org = await org_id_for("owner@example.com")
-
-    invite = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "member@example.com"},
-        headers=auth_header(token_owner),
-    )
-    assert invite.status_code == 201
-
-    response = await client.get(
-        f"/v1/organizations/{org}/members", headers=auth_header(token_member)
-    )
-
-    assert response.status_code == 200
-    emails = {item["email"] for item in response.json()["items"]}
-    assert emails == {"owner@example.com", "member@example.com"}
+        assert result.scalar_one() == 2  # owner + exactly one new member
