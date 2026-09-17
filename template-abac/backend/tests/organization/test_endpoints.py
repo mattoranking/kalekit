@@ -138,7 +138,12 @@ async def test_member_who_is_not_creator_cannot_invite(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_accepting_requires_matching_authenticated_email(
-    client: AsyncClient, register, login, auth_header, org_id_for
+    client: AsyncClient,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
 ) -> None:
     """The invitation's email is never trusted from anywhere but the
     authenticated caller -- someone else can't ride another person's
@@ -146,26 +151,34 @@ async def test_accepting_requires_matching_authenticated_email(
     await register("alice@example.com")
     await register("bob@example.com")
     await register("mallory@example.com")
-    token_alice = await login("alice@example.com")
     token_mallory = await login("mallory@example.com")
     org_a = await org_id_for("alice@example.com")
 
-    invite = await client.post(
-        f"/v1/organizations/{org_a}/invitations",
-        json={"email": "bob@example.com"},
-        headers=auth_header(token_alice),
+    # The invite endpoint never returns the raw token (only its hash is
+    # persisted, and the real token is only ever emailed to bob) -- so a
+    # genuine invitation for bob is created directly here, exactly like
+    # the invite endpoint would, so the test can hold the real token
+    # Mallory has no legitimate way to obtain in production.
+    raw_token = generate_invitation_token()
+    await create_invitation(
+        session,
+        organization_id=uuid.UUID(org_a),
+        email="bob@example.com",
+        token_hash=hash_invitation_token(raw_token),
+        invited_by=None,
+        expires_at=invitation_token_expiry(),
     )
-    assert invite.status_code == 202
 
     # Mallory has no way to obtain bob's raw token in production (it's
     # only ever emailed to bob) -- this asserts the identity check that
-    # protects that boundary, not the delivery mechanism.
+    # protects that boundary: even holding the real token, authenticating
+    # as someone whose email doesn't match it is rejected.
     response = await client.post(
         "/v1/invitations/accept",
-        json={"token": "not-the-real-token"},
+        json={"token": raw_token},
         headers=auth_header(token_mallory),
     )
-    assert response.status_code == 400
+    assert response.status_code == 403
 
 
 @pytest.mark.asyncio(loop_scope="session")
