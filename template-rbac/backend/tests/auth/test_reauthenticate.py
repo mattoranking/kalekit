@@ -17,6 +17,7 @@ from kalekit.auth.permissions import (
     store_oauth_reauth_ticket,
 )
 from kalekit.auth.repository import find_user_by_email
+from kalekit.config import settings
 from kalekit.models.refresh_token import RefreshToken
 from kalekit.oauth.client import OAUTH_PROVIDERS
 
@@ -313,3 +314,58 @@ async def test_oauth_reauth_callback_mints_ticket_not_a_session(
     assert list(query.keys()) == ["reauth_ticket"]
     assert "access_token" not in location
     assert "refresh_token" not in location
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_oauth_reauth_callback_puts_ticket_before_fragment(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """redirect_to may carry a client-side URL fragment (#...). The
+    reauth_ticket query param must land as a real query param *before*
+    the fragment, not inside/after it where the frontend router may
+    never see it."""
+    github = OAUTH_PROVIDERS["github"]
+
+    async def fake_exchange_code(code: str, code_verifier: str | None = None) -> dict:
+        return {"access_token": "provider-access-token"}
+
+    async def fake_get_user_info(access_token: str) -> dict:
+        return {"id": 7778, "email": "reauth-fragment@example.com"}
+
+    async def fake_email_verified(*args: Any, **kwargs: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(github, "exchange_code", fake_exchange_code)
+    monkeypatch.setattr(github, "get_user_info", fake_get_user_info)
+    monkeypatch.setattr(
+        "kalekit.oauth.endpoints._get_provider_email_verified", fake_email_verified
+    )
+
+    redirect_to = f"{settings.FRONTEND_URL}/account#security"
+    authorize = await client.get(
+        "/v1/oauth/github/authorize",
+        params={"reauth": "true", "redirect_to": redirect_to},
+    )
+    assert authorize.status_code == 200
+    state = parse_qs(
+        urlsplit(authorize.json()["authorization_url"]).query
+    )["state"][0]
+
+    callback = await client.get(
+        "/v1/oauth/github/callback",
+        params={"code": "provider-code", "state": state},
+        follow_redirects=False,
+    )
+
+    assert callback.status_code == 302
+    location = callback.headers["location"]
+    parts = urlsplit(location)
+
+    # The fragment is preserved as-is, at the end of the URL.
+    assert parts.fragment == "security"
+    # The ticket is a real query param, not swallowed into/after the
+    # fragment.
+    query = parse_qs(parts.query)
+    assert list(query.keys()) == ["reauth_ticket"]
+    # And it comes before the fragment in the raw string.
+    assert location.index("reauth_ticket") < location.index("#security")

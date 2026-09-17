@@ -277,10 +277,19 @@ async def oauth_callback(
             str(user.id),
             ttl_seconds=settings.OAUTH_REAUTH_TICKET_TTL_SECONDS,
         )
-        separator = "&" if "?" in redirect_to else "?"
+        # Insert the query param before any URL fragment rather than
+        # blindly appending to the end of redirect_to -- a fragment
+        # (#...) is client-side only, so a naive append would put
+        # reauth_ticket inside/after it where the frontend router may
+        # never see it as a real query param.
+        base, _, fragment = redirect_to.partition("#")
+        separator = "&" if "?" in base else "?"
         query = urlencode({"reauth_ticket": reauth_ticket})
+        url = f"{base}{separator}{query}"
+        if fragment:
+            url = f"{url}#{fragment}"
         return RedirectResponse(
-            url=f"{redirect_to}{separator}{query}",
+            url=url,
             status_code=302,
         )
 

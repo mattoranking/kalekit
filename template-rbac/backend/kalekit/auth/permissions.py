@@ -259,11 +259,13 @@ async def consume_oauth_reauth_ticket(ticket: str) -> str | None:
     """Look up and delete-on-use the user_id behind a fresh-OAuth-login
     ticket. None if the ticket is unknown/expired/already used -- same
     single-use shape as /oauth/exchange's code, so a leaked or replayed
-    ticket can't grant step-up access twice."""
+    ticket can't grant step-up access twice.
+
+    Uses GETDEL (atomic since Redis 6.2) rather than a separate GET +
+    DELETE -- two concurrent consumers hitting GET-then-DELETE could
+    otherwise both read the ticket before either deleted it, letting it
+    be replayed once per racing caller instead of truly single-use.
+    """
     r = await get_redis()
     key = f"{_OAUTH_REAUTH_PREFIX}{ticket}"
-    user_id = await r.get(key)
-    if user_id is None:
-        return None
-    await r.delete(key)
-    return user_id
+    return await r.getdel(key)
