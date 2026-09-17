@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.blocklist import (
@@ -119,6 +119,7 @@ async def refresh(
     body: RefreshRequest,
     request: Request,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    background_tasks: BackgroundTasks,
 ):
     presented_hash = hash_refresh_token(body.refresh_token)
     # Locked (SELECT ... FOR UPDATE), not the plain lookup: this path
@@ -195,7 +196,17 @@ async def refresh(
     await mark_refresh_token_replaced(session, token_row, new_token_row.id)
 
     response = TokenResponse(access_token=new_access, refresh_token=new_refresh)
-    await cache_refresh_grace_pair(
+    # Deferred via BackgroundTasks (runs after the response is sent,
+    # which is after `get_db_session`'s post-return commit has already
+    # completed) rather than awaited here -- same reasoning as
+    # organization/endpoints.py's invitation-email deferral: awaiting
+    # this inline would publish the grace-window pair to Redis before
+    # the new refresh-token row is durably committed, so a crash or
+    # unrelated commit failure in between would leave a concurrent
+    # legitimate caller holding a cached pair for a token that was
+    # never actually persisted.
+    background_tasks.add_task(
+        cache_refresh_grace_pair,
         presented_hash,
         response.model_dump(),
         ttl_seconds=settings.REFRESH_TOKEN_GRACE_PERIOD_SECONDS,

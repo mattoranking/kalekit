@@ -101,4 +101,15 @@ async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
     cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
     if cached is None:
         return None
-    return json.loads(cached)
+    try:
+        payload = json.loads(cached)
+    except (TypeError, ValueError):
+        # Corrupted/non-JSON entry -- treat exactly like a cache miss
+        # (the caller then fails closed with a 401, per refresh()'s
+        # "cache entry expired/evicted" branch) rather than letting a
+        # malformed Redis value turn a refresh attempt into an
+        # unhandled 500.
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
