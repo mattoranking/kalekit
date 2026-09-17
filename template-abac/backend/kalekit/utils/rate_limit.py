@@ -8,6 +8,7 @@ trade for the extra complexity a sliding-window/token-bucket
 implementation would add here.
 """
 
+
 from __future__ import annotations
 
 import redis.asyncio as redis
@@ -25,12 +26,13 @@ async def check_and_increment(
     that it stays >= limit until the window resets.
     """
     count = await r.incr(key)
-    if count == 1:
-        # First hit in this window -- (re)start the TTL. A crash between
-        # INCR and EXPIRE would leave a key that never expires; harmless
-        # here since it would just make that one key permanently
-        # rate-limited rather than silently open, and is vanishingly
-        # unlikely in practice.
+    if count == 1 or await r.ttl(key) == -1:
+        # (Re)start the TTL on the first hit in this window, and also
+        # any time the key is somehow missing one (`ttl` returns -1 for
+        # "exists, no expiry"). That second case recovers from a crash
+        # between the INCR above and its EXPIRE on a previous call --
+        # without it, such a key would never expire and permanently
+        # rate-limit that org/user with no way to reset.
         await r.expire(key, window_seconds)
     return count <= limit
 

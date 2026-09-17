@@ -109,7 +109,12 @@ async def create_invitation(
 ) -> OrganizationInvitation:
     invitation = OrganizationInvitation(
         organization_id=organization_id,
-        email=email,
+        # Normalized here, not by callers -- `accept_invitation`'s
+        # `user.email.lower() != invitation.email` comparison relies on
+        # stored emails always being lowercase, and that invariant
+        # should hold at the one place that writes the row rather than
+        # depend on every caller remembering to lowercase first.
+        email=email.lower(),
         token_hash=token_hash,
         invited_by=invited_by,
         expires_at=expires_at,
