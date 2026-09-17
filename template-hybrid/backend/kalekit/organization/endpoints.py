@@ -39,7 +39,7 @@ from kalekit.organization.service import (
 )
 from kalekit.postgres import get_db_session
 from kalekit.redis import get_redis
-from kalekit.utils.email import send_invitation_email
+from kalekit.utils.email import get_email_sender, send_invitation_email
 from kalekit.utils.rate_limit import check_and_increment
 
 # Not scoped to a single organization_id -- this lists the caller's own
@@ -120,6 +120,18 @@ async def create_organization_invitation(
             status_code=403,
             detail="Cannot grant a role higher than your own",
         )
+
+    # Called here, synchronously, purely to surface a misconfigured
+    # deployment as a request-time failure -- `get_email_sender` raises
+    # outside dev/test when no real provider is wired up. Left to raise
+    # only from inside the `BackgroundTasks` callback below (which runs
+    # after this response has already been sent), the caller would see
+    # a normal 202 "invitation sent" while the email silently never
+    # goes out, which defeats the whole point of that function failing
+    # loudly. `send_invitation_email` still calls it again itself when
+    # the background task actually runs; that's harmless and not worth
+    # a shared-instance refactor to avoid.
+    get_email_sender()
 
     organization = await session.get(Organization, organization_id)
     if organization is None:

@@ -5,7 +5,9 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.config import Environment, settings
 from kalekit.models.organization import MemberRole, OrganizationMember
+from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.organization.repository import create_invitation
 from kalekit.organization.service import (
     generate_invitation_token,
@@ -207,3 +209,42 @@ async def test_accepting_is_single_use(
         headers=auth_header(token_bob),
     )
     assert replay.status_code == 400
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_inviting_with_no_email_provider_configured_fails_the_request(
+    client: AsyncClient,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`get_email_sender` raises outside dev/test when no real provider
+    is configured (see `utils/email.py`). That must surface as a
+    request-time failure of the invite endpoint itself, not get
+    swallowed inside the `BackgroundTasks` callback that sends the
+    email -- which runs after the 202 response is already on the wire,
+    where a raised exception would only reach server logs while the
+    caller is told "invitation sent" for an email that never goes out.
+    """
+    monkeypatch.setattr(settings, "ENV", Environment.production)
+
+    await register("alice@example.com")
+    token_alice = await login("alice@example.com")
+    org_a = await org_id_for("alice@example.com")
+
+    with pytest.raises(RuntimeError):
+        await client.post(
+            f"/v1/organizations/{org_a}/invitations",
+            json={"email": "bob@example.com", "role": "member"},
+            headers=auth_header(token_alice),
+        )
+
+    # No invitation row was created either -- the failure happened
+    # before `create_invitation`, not after a half-completed invite.
+    result = await session.execute(
+        select(func.count()).select_from(OrganizationInvitation)
+    )
+    assert result.scalar_one() == 0
