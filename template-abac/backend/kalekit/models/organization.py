@@ -17,6 +17,16 @@ class Organization(RecordModel):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    # The only user allowed to invite new members (see issue #24): flat
+    # membership means every member can read/write the org's data, but
+    # growing the tenant is not something membership alone should grant
+    # -- otherwise any member could pull arbitrary registered users into
+    # the org unilaterally. Nullable so a future admin-created or
+    # system-seeded organization isn't forced to have a human creator.
+    created_by: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id"), nullable=True
+    )
+
     members: Mapped[list["OrganizationMember"]] = relationship(
         back_populates="organization", cascade="all, delete-orphan"
     )

@@ -1,19 +1,29 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import Organization, OrganizationMember
+from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.models.user import User
 from kalekit.utils.db.tenancy import tenant_filter
 
 
-async def create_organization(session: AsyncSession, *, name: str) -> Organization:
-    organization = Organization(name=name)
+async def create_organization(
+    session: AsyncSession, *, name: str, created_by: uuid.UUID | None = None
+) -> Organization:
+    organization = Organization(name=name, created_by=created_by)
     session.add(organization)
     await session.flush()
     return organization
+
+
+async def get_organization(
+    session: AsyncSession, *, organization_id: uuid.UUID
+) -> Organization | None:
+    return await session.get(Organization, organization_id)
 
 
 async def get_member(
@@ -86,3 +96,50 @@ async def list_members(
         .where(tenant_filter(OrganizationMember, organization_id=organization_id))
     )
     return list(result.all())
+
+
+async def create_invitation(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    email: str,
+    token_hash: str,
+    invited_by: uuid.UUID | None,
+    expires_at: datetime,
+) -> OrganizationInvitation:
+    invitation = OrganizationInvitation(
+        organization_id=organization_id,
+        email=email,
+        token_hash=token_hash,
+        invited_by=invited_by,
+        expires_at=expires_at,
+    )
+    session.add(invitation)
+    await session.flush()
+    return invitation
+
+
+async def get_valid_invitation_by_token_hash(
+    session: AsyncSession, token_hash: str
+) -> OrganizationInvitation | None:
+    """A token is valid iff it exists, is unused, and hasn't expired."""
+    result = await session.execute(
+        select(OrganizationInvitation).where(
+            OrganizationInvitation.token_hash == token_hash
+        )
+    )
+    invitation = result.scalar_one_or_none()
+    if invitation is None:
+        return None
+    if invitation.accepted_at is not None:
+        return None
+    if invitation.expires_at < datetime.now(timezone.utc):
+        return None
+    return invitation
+
+
+async def mark_invitation_accepted(
+    session: AsyncSession, invitation: OrganizationInvitation
+) -> None:
+    invitation.accepted_at = datetime.now(timezone.utc)
+    await session.flush()
