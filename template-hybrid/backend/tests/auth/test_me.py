@@ -1,5 +1,7 @@
 import pytest
 
+from kalekit.models.organization import MemberRole
+
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_me_exposes_org_id_and_role(client, register, login, auth_header) -> None:
@@ -23,22 +25,17 @@ async def test_me_exposes_org_id_and_role(client, register, login, auth_header) 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_me_reports_non_owner_role(
-    client, register, login, auth_header, org_id_for
+    client, register, login, auth_header, org_id_for, add_member
 ) -> None:
     """A member invited at a role other than owner sees that role
     reflected back, not the inviting owner's."""
     await register("owner@example.com")
     await register("viewer@example.com")
-    token_owner = await login("owner@example.com")
+    token_viewer = await login("viewer@example.com")
     org = await org_id_for("owner@example.com")
 
-    await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "viewer@example.com", "role": "viewer"},
-        headers=auth_header(token_owner),
-    )
+    await add_member(org, token_viewer, "viewer@example.com", role=MemberRole.viewer)
 
-    token_viewer = await login("viewer@example.com")
     response = await client.get("/v1/auth/me", headers=auth_header(token_viewer))
 
     assert response.status_code == 200

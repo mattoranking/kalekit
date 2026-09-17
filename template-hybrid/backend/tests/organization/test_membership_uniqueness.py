@@ -19,7 +19,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from kalekit.auth.repository import create_user
 from kalekit.models.organization import MemberRole, OrganizationMember
-from kalekit.organization.repository import add_member, create_organization
+from kalekit.organization.repository import (
+    add_member,
+    create_invitation,
+    create_organization,
+)
+from kalekit.organization.service import (
+    generate_invitation_token,
+    hash_invitation_token,
+    invitation_token_expiry,
+)
 
 
 @pytest_asyncio.fixture(loop_scope="session")
@@ -42,44 +51,56 @@ async def owner_and_org(engine: AsyncEngine) -> tuple[str, str]:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_reinviting_existing_member_returns_409(
-    client, register, login, auth_header, org_id_for, session: AsyncSession
+async def test_reaccepting_after_already_a_member_returns_409(
+    client, register, login, auth_header, org_id_for, add_member, session: AsyncSession
 ) -> None:
-    """Sequential duplicate invite: the second call must be rejected, not
-    create a second row -- the acceptance criterion in the issue is
+    """A second, independently-issued invitation for someone who is
+    already a member is rejected (409) when accepted, and never
+    creates a duplicate row -- the acceptance criterion in the issue is
     explicit that this must not merely be caught by the race test.
 
-    Also proves no privilege escalation slips through: the rejected
-    second invite asks for `admin`, so this also checks the existing
-    row's role is still `member` afterwards -- the scenario the issue
-    calls out as the privilege-escalation vector for this bug.
+    Also proves no privilege escalation slips through: the second
+    invitation offers `admin`, so this also checks the existing row's
+    role is still `member` afterwards -- the scenario the issue calls
+    out as the privilege-escalation vector for this bug.
     """
-    await register("owner@example.com")
+    owner_register = await register("owner@example.com")
     await register("member@example.com")
-    token_owner = await login("owner@example.com")
+    token_member = await login("member@example.com")
     org = await org_id_for("owner@example.com")
+    owner_id = uuid.UUID(owner_register.json()["id"])
 
-    first = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "member@example.com", "role": "member"},
-        headers=auth_header(token_owner),
+    await add_member(org, token_member, "member@example.com", role=MemberRole.member)
+
+    # A second, independently-issued invitation for the same email,
+    # this time offering `admin` -- created directly (mirroring how the
+    # invite endpoint itself would) rather than through the endpoint,
+    # since only the token's hash is ever persisted for the endpoint to
+    # give back.
+    raw_token = generate_invitation_token()
+    await create_invitation(
+        session,
+        organization_id=uuid.UUID(org),
+        email="member@example.com",
+        role=MemberRole.admin,
+        token_hash=hash_invitation_token(raw_token),
+        invited_by=owner_id,
+        expires_at=invitation_token_expiry(),
     )
-    assert first.status_code == 201
-
-    second = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "member@example.com", "role": "admin"},
-        headers=auth_header(token_owner),
+    second_accept = await client.post(
+        "/v1/invitations/accept",
+        json={"token": raw_token},
+        headers=auth_header(token_member),
     )
 
-    assert second.status_code == 409
+    assert second_accept.status_code == 409
 
     rows = (
         (
             await session.execute(
                 select(OrganizationMember).where(
                     OrganizationMember.organization_id == uuid.UUID(org),
-                    OrganizationMember.user_id == uuid.UUID(first.json()["user_id"]),
+                    OrganizationMember.role != MemberRole.owner,
                 )
             )
         )
@@ -136,23 +157,17 @@ async def test_concurrent_invites_race_exactly_one_wins(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_non_duplicated_member_still_works_normally(
-    client, register, login, auth_header, org_id_for
+    client, register, login, auth_header, org_id_for, add_member
 ) -> None:
     """Regression for `_get_membership`: a user with exactly one
     membership row must keep working (no spurious 500 from
     `scalar_one_or_none` seeing more than one row)."""
     await register("owner@example.com")
     await register("member@example.com")
-    token_owner = await login("owner@example.com")
     token_member = await login("member@example.com")
     org = await org_id_for("owner@example.com")
 
-    invite = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "member@example.com", "role": "member"},
-        headers=auth_header(token_owner),
-    )
-    assert invite.status_code == 201
+    await add_member(org, token_member, "member@example.com", role=MemberRole.member)
 
     response = await client.get(
         f"/v1/organizations/{org}/members", headers=auth_header(token_member)

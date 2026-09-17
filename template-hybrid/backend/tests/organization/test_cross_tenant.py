@@ -24,16 +24,16 @@ async def test_non_member_cannot_list_members(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_non_member_cannot_add_member(
+async def test_non_member_cannot_invite(
     client: AsyncClient,
     session: AsyncSession,
     auth_header,
     two_tenants: TwoTenants,
 ) -> None:
     """A non-member can't invite anyone into another org's membership
-    list either -- same 404 gate, and it never reaches `add_member`."""
+    list either -- same 404 gate, and it never reaches `create_invitation`."""
     response = await client.post(
-        f"/v1/organizations/{two_tenants.org_a}/members",
+        f"/v1/organizations/{two_tenants.org_a}/invitations",
         json={"email": "tenant-b@example.com", "role": "member"},
         headers=auth_header(two_tenants.token_b),
     )
