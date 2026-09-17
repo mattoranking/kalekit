@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import OrganizationMember
 from kalekit.oauth.repository import find_or_create_oauth_user
-from kalekit.organization.repository import add_member, create_invitation
+from kalekit.organization.repository import add_member as add_member_repo
+from kalekit.organization.repository import create_invitation
 from kalekit.organization.service import (
     generate_invitation_token,
     hash_invitation_token,
@@ -82,7 +83,7 @@ async def test_listing_members_with_null_email_returns_200(
         account_email=None,
         access_token="token",
     )
-    await add_member(
+    await add_member_repo(
         session, organization_id=uuid.UUID(org_a), user_id=oauth_user.id
     )
 
