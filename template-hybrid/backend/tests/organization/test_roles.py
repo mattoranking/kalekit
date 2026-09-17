@@ -248,10 +248,10 @@ async def test_demoted_inviters_pending_invitation_cannot_be_accepted(
             OrganizationMember.organization_id == uuid.UUID(org),
         )
     )
-    emails_by_role = {m.role for m in invitee_membership.scalars().all()}
-    assert MemberRole.owner in emails_by_role
-    assert MemberRole.member in emails_by_role  # the demoted former admin
-    assert MemberRole.admin not in emails_by_role
+    roles_present = {m.role for m in invitee_membership.scalars().all()}
+    assert MemberRole.owner in roles_present
+    assert MemberRole.member in roles_present  # the demoted former admin
+    assert MemberRole.admin not in roles_present
 
 
 @pytest.mark.asyncio(loop_scope="session")
