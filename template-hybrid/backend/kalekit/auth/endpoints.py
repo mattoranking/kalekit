@@ -203,13 +203,22 @@ async def logout(
     user: Annotated[User, Depends(get_current_user)],
     jti: Annotated[str | None, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-    body: LogoutRequest = LogoutRequest(),
+    body: LogoutRequest | None = None,
 ):
+    # `body` defaults to None, not a shared LogoutRequest() instance --
+    # a mutable Pydantic model as a function default is evaluated once
+    # at import time and reused across every request that omits a
+    # body, which is a footgun if anything ever comes to mutate it.
+    # A pre-existing hybrid client that calls /auth/logout with no
+    # body at all (only an access token) must keep working -- that's
+    # why this stays optional rather than a required LogoutRequest,
+    # unlike RBAC's more recent logout() signature.
+    #
     # Only the family tied to *this* session's refresh token is
     # revoked -- not every refresh token the user holds. Logging out on
     # one device/tab must not knock the user out of a different one.
     # Use /auth/logout-all for that.
-    if body.refresh_token:
+    if body is not None and body.refresh_token:
         token_hash = hash_refresh_token(body.refresh_token)
         token_row = await get_refresh_token_by_hash(session, token_hash)
         if token_row is not None and token_row.user_id == user.id:

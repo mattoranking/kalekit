@@ -18,7 +18,16 @@ class RefreshToken(RecordModel):
     __tablename__ = "refresh_tokens"
 
     user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
-    token_hash: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # Unique, not just indexed: `token_hash` is a sha256 digest of a
+    # 256-bit opaque secret (see generate_refresh_token/hash_refresh_token
+    # in kalekit.auth.service), so a collision is astronomically
+    # unlikely in practice -- the constraint exists to make "at most one
+    # row per raw token" an enforced DB invariant rather than an
+    # assumption, since get_refresh_token_by_hash relies on
+    # scalar_one_or_none() finding at most one match.
+    token_hash: Mapped[str] = mapped_column(
+        String, nullable=False, unique=True, index=True
+    )
 
     # All tokens issued from the same original login/OAuth exchange share a
     # family_id. Rotation carries it forward; reuse of an already-rotated
