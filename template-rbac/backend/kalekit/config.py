@@ -141,6 +141,54 @@ class Settings(BaseSettings):
     # frontend, which then immediately exchanges it server-side.
     OAUTH_EXCHANGE_CODE_TTL_SECONDS: int = 60
 
+    # --- Rate limiting (#18) ---
+    # Guards the auth endpoints most exposed to brute force, enumeration
+    # and abuse. On by default; flipped off in .env.testing so the rest
+    # of the suite (which logs in/registers the same handful of emails,
+    # and shares one "unknown" client IP under the ASGI test transport)
+    # doesn't trip these limits as a side effect -- a dedicated test
+    # module flips it back on with tight thresholds to exercise the
+    # limiter itself.
+    RATE_LIMIT_ENABLED: bool = True
+
+    # Login: limited both by IP (protects against credential stuffing
+    # across many accounts from one source) and by target account
+    # (protects one account against password guessing spread across
+    # many IPs) -- either one alone misses the other attack shape.
+    LOGIN_RATE_LIMIT_PER_IP: int = 10
+    LOGIN_RATE_LIMIT_IP_WINDOW_SECONDS: int = 60
+    # Only failed attempts count against the per-account limit (a
+    # successful login clears the counter) -- a legitimate user mistyping
+    # their password a few times shouldn't lock out the next correct
+    # attempt any sooner than this budget allows.
+    LOGIN_RATE_LIMIT_PER_ACCOUNT: int = 5
+    LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS: int = 900  # 15 minutes
+
+    # Registration: per-IP only -- there's no "account" yet to key on.
+    REGISTER_RATE_LIMIT_PER_IP: int = 5
+    REGISTER_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+
+    # Refresh: keyed per session (refresh token family) once the
+    # presented token resolves to one, not per IP -- a session is
+    # legitimately used from a changing IP (mobile networks, VPNs), and
+    # the token itself is already the unguessable secret.
+    REFRESH_RATE_LIMIT_PER_SESSION: int = 60
+    REFRESH_RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # Resend-verification: authenticated, so keyed per user rather than
+    # per IP -- caps how many verification emails one account can
+    # trigger in a window.
+    RESEND_VERIFICATION_RATE_LIMIT_PER_USER: int = 5
+    RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+
+    # Only trust `X-Forwarded-For` (set by Traefik -- see compose.yml)
+    # for IP-keyed rate limiting when the API actually sits behind a
+    # proxy that sets it honestly. On a direct connection, any client
+    # could set that header itself to claim a fresh IP on every request
+    # and dodge IP-based limiting entirely -- so this defaults to off,
+    # and a deployment behind Traefik/another trusted proxy opts in.
+    TRUST_PROXY_HEADERS: bool = False
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
