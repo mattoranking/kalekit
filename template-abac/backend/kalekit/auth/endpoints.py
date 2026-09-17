@@ -8,7 +8,7 @@ from kalekit.auth.dependencies import get_current_user
 from kalekit.auth.repository import (
     create_user,
     find_user_by_email,
-    get_refresh_token_by_hash,
+    get_refresh_token_by_hash_for_update,
     get_refresh_token_by_id,
     mark_refresh_token_replaced,
     revoke_refresh_token_family,
@@ -107,7 +107,11 @@ async def refresh(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     presented_hash = hash_refresh_token(body.refresh_token)
-    token_row = await get_refresh_token_by_hash(session, presented_hash)
+    # Locked read: this endpoint is check-then-rotate, so two requests
+    # racing in with the same token must be serialized on this row --
+    # otherwise both could observe `revoked=False` and both rotate. See
+    # get_refresh_token_by_hash_for_update's docstring.
+    token_row = await get_refresh_token_by_hash_for_update(session, presented_hash)
 
     if token_row is None:
         raise HTTPException(status_code=401, detail="Invalid refresh token")

@@ -65,9 +65,43 @@ async def get_refresh_token_by_hash(
     revoked/replaced state -- the caller needs to see revoked and
     already-rotated rows too, to distinguish "unknown token" from
     "token reuse" (which additionally triggers family revocation).
+
+    Plain (unlocked) read -- use `get_refresh_token_by_hash_for_update`
+    instead for any caller that's about to rotate/revoke based on what
+    it reads, so a concurrent rotation of the same token can't race it.
     """
     result = await session.execute(
         select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_refresh_token_by_hash_for_update(
+    session: AsyncSession, token_hash: str
+) -> RefreshToken | None:
+    """Same lookup as `get_refresh_token_by_hash`, but takes a row lock
+    (`SELECT ... FOR UPDATE`) on the returned row -- same pattern as
+    `kalekit.organization.repository.remove_member`'s org-row lock.
+
+    `/auth/refresh` is check-then-write: it reads a token's
+    revoked/replaced_by state and then, if unrevoked, rotates it. Two
+    requests racing in with the *same* token (e.g. a network retry, or
+    two BFF instances refreshing concurrently) could otherwise both
+    read `revoked=False` before either commits its rotation, and both
+    proceed to rotate -- producing two successor rows from one token
+    instead of the intended single rotation (the grace-window cache
+    only smooths over a *replay* of an already-rotated token; it does
+    nothing to prevent this simultaneous double-rotation). Locking the
+    row here serializes any concurrent refreshes of the same token on
+    this lock, so the second request only proceeds once the first has
+    committed -- at which point it sees `revoked=True` and takes the
+    grace-window/reuse-detection path instead of racing a second
+    rotation through.
+    """
+    result = await session.execute(
+        select(RefreshToken)
+        .where(RefreshToken.token_hash == token_hash)
+        .with_for_update()
     )
     return result.scalar_one_or_none()
 
