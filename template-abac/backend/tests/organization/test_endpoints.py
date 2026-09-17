@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import OrganizationMember
-from kalekit.organization.repository import create_invitation
+from kalekit.oauth.repository import find_or_create_oauth_user
+from kalekit.organization.repository import add_member, create_invitation
 from kalekit.organization.service import (
     generate_invitation_token,
     hash_invitation_token,
@@ -55,6 +56,45 @@ async def test_non_member_cannot_see_members(
     )
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_listing_members_with_null_email_returns_200(
+    client: AsyncClient,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
+) -> None:
+    """A member who signed up through a provider that doesn't expose an
+    email (e.g. Twitter/X, see #28) has `User.email = None`. Listing
+    members must serialize that member as `email: null` instead of
+    raising a 500 from `MemberResponse` validation -- see #70."""
+    await register("alice@example.com")
+    token_alice = await login("alice@example.com")
+    org_a = await org_id_for("alice@example.com")
+
+    oauth_user = await find_or_create_oauth_user(
+        session,
+        platform="twitter",
+        account_id="no-email-user",
+        account_email=None,
+        access_token="token",
+    )
+    await add_member(
+        session, organization_id=uuid.UUID(org_a), user_id=oauth_user.id
+    )
+
+    response = await client.get(
+        f"/v1/organizations/{org_a}/members", headers=auth_header(token_alice)
+    )
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 2
+    member = next(item for item in items if item["user_id"] == str(oauth_user.id))
+    assert member["email"] is None
 
 
 @pytest.mark.asyncio(loop_scope="session")
