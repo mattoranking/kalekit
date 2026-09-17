@@ -8,6 +8,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kalekit.utils.db.models import RecordModel
+from kalekit.utils.func import generate_uuid
 
 if TYPE_CHECKING:
     from kalekit.models.user import User
@@ -17,7 +18,35 @@ class RefreshToken(RecordModel):
     __tablename__ = "refresh_tokens"
 
     user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id"), nullable=False)
-    token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # Unique, not just indexed: `token_hash` is a sha256 digest of a
+    # 256-bit opaque secret (see generate_refresh_token/hash_refresh_token
+    # in kalekit.auth.service), so a collision is astronomically
+    # unlikely in practice -- the constraint exists to make "at most one
+    # row per raw token" an enforced DB invariant rather than an
+    # assumption, since get_refresh_token_by_hash relies on
+    # scalar_one_or_none() finding at most one match.
+    token_hash: Mapped[str] = mapped_column(
+        String, nullable=False, unique=True, index=True
+    )
+
+    # All tokens issued from the same original login/OAuth exchange share a
+    # family_id. Rotation carries it forward; reuse of an already-rotated
+    # token in the family revokes every token that shares it (see
+    # kalekit.auth.repository.revoke_refresh_token_family).
+    family_id: Mapped[UUID] = mapped_column(
+        Uuid, nullable=False, index=True, default=generate_uuid
+    )
+
+    # Set to the id of the token that replaced this one when it is rotated.
+    # Combined with `revoked` and `updated_at` (the rotation timestamp),
+    # this implements the grace window: the immediate predecessor of the
+    # currently-active token can be replayed for a short time after
+    # rotation without triggering reuse detection, so two callers racing
+    # to refresh the same token both succeed.
+    replaced_by: Mapped[UUID | None] = mapped_column(
+        Uuid, ForeignKey("refresh_tokens.id"), nullable=True, default=None
+    )
+
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
