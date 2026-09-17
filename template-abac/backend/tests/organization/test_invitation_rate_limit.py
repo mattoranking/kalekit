@@ -2,9 +2,13 @@
 / RBAC #18): without it, a compromised or careless account could blast
 invitations at arbitrary emails all day."""
 
+import uuid
+
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.config import settings
+from kalekit.organization.repository import add_member, create_organization
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -61,3 +65,61 @@ async def test_invitations_are_rate_limited_per_inviter(
         headers=auth_header(token_alice),
     )
     assert second.status_code == 429
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_org_exceeded_request_does_not_burn_the_inviters_own_quota(
+    client,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request rejected for exceeding the *org*-wide limit must not
+    also cost the inviter a unit of their own personal quota -- that
+    inviter did nothing wrong, and their org being saturated shouldn't
+    exhaust an unrelated counter of theirs (e.g. one that also covers
+    invites they send from a different org they created).
+
+    org_a's limit is set to 1 and alice's personal limit to 2. Two
+    invites into org_a (the second rejected for exceeding org_a's
+    limit) should only ever cost alice one unit of her own quota, not
+    two -- leaving room for exactly one more successful invite from a
+    second org she also created, org_b.
+    """
+    monkeypatch.setattr(settings, "INVITATION_RATE_LIMIT_PER_ORG", 1)
+    monkeypatch.setattr(settings, "INVITATION_RATE_LIMIT_PER_INVITER", 2)
+
+    alice_register = await register("alice@example.com")
+    token_alice = await login("alice@example.com")
+    org_a = await org_id_for("alice@example.com")
+    alice_id = uuid.UUID(alice_register.json()["id"])
+
+    org_b = await create_organization(session, name="Second Org", created_by=alice_id)
+    await add_member(session, organization_id=org_b.id, user_id=alice_id)
+
+    first = await client.post(
+        f"/v1/organizations/{org_a}/invitations",
+        json={"email": "invitee-0@example.com"},
+        headers=auth_header(token_alice),
+    )
+    assert first.status_code == 202  # org_a: 1/1, alice: 1/2
+
+    second = await client.post(
+        f"/v1/organizations/{org_a}/invitations",
+        json={"email": "invitee-1@example.com"},
+        headers=auth_header(token_alice),
+    )
+    assert second.status_code == 429  # org_a exceeded -- alice's quota untouched
+
+    third = await client.post(
+        f"/v1/organizations/{org_b.id}/invitations",
+        json={"email": "invitee-2@example.com"},
+        headers=auth_header(token_alice),
+    )
+    # Proves alice's quota is still 1/2, not 2/2: if the org-exceeded
+    # request above had incorrectly also burned it, this would be her
+    # third hit against a limit of 2 and get rejected instead.
+    assert third.status_code == 202  # org_b: 1/1, alice: 2/2

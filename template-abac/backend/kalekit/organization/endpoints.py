@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -87,6 +87,7 @@ async def create_organization_invitation(
     body: InviteMemberRequest,
     session: Annotated[AsyncSession, Depends(get_db_session)],
     organization: Annotated[Organization, Depends(require_org_creator)],
+    background_tasks: BackgroundTasks,
 ) -> InvitationAckResponse:
     """Invites `body.email` to join the organization.
 
@@ -98,19 +99,29 @@ async def create_organization_invitation(
     `POST /invitations/accept`.
     """
     r = await get_redis()
+    # Check/increment the org-wide limit first, and only touch the
+    # inviter's personal counter if that passes. An org already at its
+    # limit shouldn't also burn quota from an inviter who did nothing
+    # wrong -- the reverse (an inviter-exceeded request still costing
+    # the org a unit) is fine to leave as-is, since it's still a real
+    # attempted invite against that org's overall throughput.
     org_allowed = await check_and_increment(
         r,
         f"invitation_rate:org:{organization_id}",
         limit=settings.INVITATION_RATE_LIMIT_PER_ORG,
         window_seconds=settings.INVITATION_RATE_LIMIT_WINDOW_SECONDS,
     )
+    if not org_allowed:
+        raise HTTPException(
+            status_code=429, detail="Too many invitations, try again later"
+        )
     inviter_allowed = await check_and_increment(
         r,
         f"invitation_rate:user:{organization.created_by}",
         limit=settings.INVITATION_RATE_LIMIT_PER_INVITER,
         window_seconds=settings.INVITATION_RATE_LIMIT_WINDOW_SECONDS,
     )
-    if not org_allowed or not inviter_allowed:
+    if not inviter_allowed:
         raise HTTPException(
             status_code=429, detail="Too many invitations, try again later"
         )
@@ -125,8 +136,18 @@ async def create_organization_invitation(
         invited_by=organization.created_by,
         expires_at=invitation_token_expiry(),
     )
-    await send_invitation_email(
-        to=email, organization_name=organization.name, token=raw_token
+    # Deferred via BackgroundTasks (runs after the response is sent,
+    # which is after `get_db_session`'s post-return commit has already
+    # completed) rather than awaited here -- awaiting it inline would
+    # let the invitee receive a working-looking link before the token
+    # row is durably committed, so a crash or unrelated commit failure
+    # between the email going out and the commit completing would leave
+    # a silently dead invitation.
+    background_tasks.add_task(
+        send_invitation_email,
+        to=email,
+        organization_name=organization.name,
+        token=raw_token,
     )
     return InvitationAckResponse()
 

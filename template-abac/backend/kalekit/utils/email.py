@@ -33,7 +33,25 @@ class ConsoleEmailSender(EmailSender):
 
 
 def get_email_sender() -> EmailSender:
-    return ConsoleEmailSender()
+    """Returns the outbound email sender to use.
+
+    `ConsoleEmailSender` only in dev/test, where logging the full
+    accept-invitation link -- including its raw, otherwise-secret token
+    -- instead of delivering it is the whole point. Outside dev/test
+    this raises rather than silently falling back to it: nothing today
+    stops this function from running in a real deployment, and doing so
+    would leak invitation tokens (and any future secrets routed through
+    this module) straight into application logs. Wire up a real
+    provider (SES, Postmark, Resend, ...) here before shipping.
+    """
+    if settings.is_development() or settings.is_testing():
+        return ConsoleEmailSender()
+    raise RuntimeError(
+        "No production EmailSender is configured. ConsoleEmailSender logs "
+        "secrets (e.g. invitation tokens) and must not run outside "
+        "development/testing -- wire up a real provider in "
+        "get_email_sender() before deploying."
+    )
 
 
 async def send_invitation_email(
