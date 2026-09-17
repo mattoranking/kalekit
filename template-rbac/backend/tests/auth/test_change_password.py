@@ -138,17 +138,21 @@ async def test_change_password_requires_authentication(client: AsyncClient) -> N
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_change_password_without_a_session_id_blocks_every_access_token(
+async def test_change_password_without_a_session_id_requires_reauth_not_500(
     client: AsyncClient, session: AsyncSession
 ) -> None:
     """Some access tokens carry no `sid` claim (minted outside
-    login/refresh/OAuth, or by older code). change-password can't
-    spare "the current one" on the access-token side without a family
-    id to exempt, so it must fail closed -- block every access token
-    the user holds -- rather than silently leave the caller's own
-    token usable until it naturally expires."""
+    login/refresh/OAuth, or by older code). Since #16, change-password
+    is gated by `require_recent_auth`, which needs a real session row
+    to read a recency proof from -- a sidless token has none, so it
+    fails closed with `reauth_required` rather than an unguarded
+    uuid.UUID() parse turning it into an unhandled 500, and rather than
+    the pre-#16 behavior of proceeding and blocking every access token
+    the user holds (change_password's own keep_family_id=None fallback,
+    now unreachable through this endpoint precisely because
+    require_recent_auth rejects the request before that logic runs)."""
     email = "change-pw-no-sid@example.com"
-    normal_access_token, _ = await _login_pair(client, email)
+    await _login_pair(client, email)
 
     user = await find_user_by_email(session, email)
     assert user is not None
@@ -159,17 +163,8 @@ async def test_change_password_without_a_session_id_blocks_every_access_token(
         headers=_auth(sidless_token),
         json={"current_password": "password123", "new_password": "newpassword456"},
     )
-    assert response.status_code == 200
-
-    # The very token that made the request is blocked afterward...
-    after = await client.get("/v1/auth/me", headers=_auth(sidless_token))
-    assert after.status_code == 401
-
-    # ...and so is every other access token the user held.
-    also_blocked = await client.get(
-        "/v1/auth/me", headers=_auth(normal_access_token)
-    )
-    assert also_blocked.status_code == 401
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "reauth_required"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -177,9 +172,9 @@ async def test_change_password_with_a_malformed_sid_fails_closed_not_500(
     client: AsyncClient, session: AsyncSession
 ) -> None:
     """`sid` is attacker-influenceable in principle -- a malformed
-    value must be treated the same as no session id (fall back to
-    block_all_user_tokens) instead of an unguarded uuid.UUID() parse
-    turning it into an unhandled 500."""
+    value must be treated the same as no session id: `require_recent_auth`
+    (#16) fails closed with `reauth_required` instead of an unguarded
+    uuid.UUID() parse turning it into an unhandled 500."""
     email = "change-pw-bad-sid@example.com"
     await _login_pair(client, email)
 
@@ -192,4 +187,5 @@ async def test_change_password_with_a_malformed_sid_fails_closed_not_500(
         headers=_auth(bad_sid_token),
         json={"current_password": "password123", "new_password": "newpassword456"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "reauth_required"

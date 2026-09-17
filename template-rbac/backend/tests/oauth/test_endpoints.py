@@ -88,6 +88,60 @@ async def test_authorize_accepts_extra_allowlisted_origin(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_authorize_reauth_forces_google_prompt_login(
+    client: AsyncClient,
+) -> None:
+    """Google supports `prompt=login`, so a reauth=True authorize call
+    must actually force the IdP to re-check credentials, not just tag
+    the Redis state (#16 step-up reauth)."""
+    response = await client.get(
+        "/v1/oauth/google/authorize", params={"reauth": "true"}
+    )
+
+    assert response.status_code == 200
+    authorization_url = response.json()["authorization_url"]
+    query = parse_qs(urlsplit(authorization_url).query)
+    assert query["prompt"] == ["login"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_authorize_without_reauth_omits_prompt_login(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/v1/oauth/google/authorize")
+
+    assert response.status_code == 200
+    authorization_url = response.json()["authorization_url"]
+    query = parse_qs(urlsplit(authorization_url).query)
+    assert "prompt" not in query
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_authorize_reauth_is_best_effort_for_github(
+    client: AsyncClient,
+) -> None:
+    """GitHub has no documented mechanism to force re-authentication
+    over an existing session (see kalekit/oauth/client.py), so a
+    reauth=True call is deliberately a no-op on the authorization URL
+    itself -- this is the known best-effort limitation, not a bug."""
+    response = await client.get(
+        "/v1/oauth/github/authorize", params={"reauth": "true"}
+    )
+
+    assert response.status_code == 200
+    authorization_url = response.json()["authorization_url"]
+    baseline = await client.get("/v1/oauth/github/authorize")
+    baseline_url = baseline.json()["authorization_url"]
+
+    # Same query keys either way (modulo the single-use `state` value).
+    reauth_query = parse_qs(urlsplit(authorization_url).query)
+    baseline_query = parse_qs(urlsplit(baseline_url).query)
+    reauth_query.pop("state")
+    baseline_query.pop("state")
+    assert reauth_query == baseline_query
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_callback_redirects_to_frontend_without_tokens_in_url(
     client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -94,3 +94,17 @@ class ForgotPasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str
+
+
+class ReauthenticateRequest(BaseModel):
+    # Which of these is actually required depends on how the caller
+    # authenticates (see #16): password accounts must provide
+    # `password`; OAuth-only accounts (no password_hash) must provide
+    # `oauth_ticket`, the single-use ticket minted by
+    # /oauth/{provider}/callback after completing a fresh provider
+    # login with `reauth=true`. Both fields are optional at the schema
+    # level -- the endpoint itself enforces which one a given user
+    # needs and gives a precise error if it's missing; a value in the
+    # field that doesn't apply to the caller's account type is ignored.
+    password: str | None = None
+    oauth_ticket: str | None = None

@@ -234,3 +234,42 @@ async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
     if cached is None:
         return None
     return json.loads(cached)
+
+
+# ---------------------------------------------------------------------------
+# OAuth re-authentication tickets (#16): proof that an OAuth-only user
+# (no password_hash to re-enter) just completed a fresh provider login,
+# for POST /auth/reauthenticate. Minted by /oauth/{provider}/callback's
+# `reauth` branch, handed to the frontend in the redirect the same
+# ticket-not-tokens way /oauth/exchange's code is, and consumed exactly
+# once by /auth/reauthenticate.
+# ---------------------------------------------------------------------------
+
+_OAUTH_REAUTH_PREFIX = "oauth_reauth:"
+
+
+async def store_oauth_reauth_ticket(
+    ticket: str, user_id: str, ttl_seconds: int
+) -> None:
+    r = await get_redis()
+    await r.set(f"{_OAUTH_REAUTH_PREFIX}{ticket}", user_id, ex=ttl_seconds)
+
+
+async def consume_oauth_reauth_ticket(ticket: str) -> str | None:
+    """Look up and delete-on-use the user_id behind a fresh-OAuth-login
+    ticket. None if the ticket is unknown/expired/already used -- same
+    single-use shape as /oauth/exchange's code, so a leaked or replayed
+    ticket can't grant step-up access twice.
+
+    Uses GETDEL (atomic) rather than a separate GET + DELETE -- two
+    concurrent consumers hitting GET-then-DELETE could otherwise both
+    read the ticket before either deleted it, letting it be replayed
+    once per racing caller instead of truly single-use.
+
+    Requires Redis >= 6.2 (GETDEL was added in that release); this
+    template pins `redis:7-alpine` in compose.yml, well above that
+    floor, so no older-Redis fallback is provided here.
+    """
+    r = await get_redis()
+    key = f"{_OAUTH_REAUTH_PREFIX}{ticket}"
+    return await r.getdel(key)

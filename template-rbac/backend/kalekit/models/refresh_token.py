@@ -66,6 +66,22 @@ class RefreshToken(RecordModel):
         DateTime(timezone=True), nullable=False, default=utc_now
     )
 
+    # The last time this session actually *proved* identity -- a fresh
+    # login/OAuth exchange, or a successful POST /auth/reauthenticate
+    # (#16) -- as opposed to merely staying alive via /auth/refresh,
+    # which proves only possession of the refresh token, not a fresh
+    # credential check. Rotation carries this forward unchanged (like
+    # `family_created_at`) since refreshing isn't itself proof of
+    # identity; POST /auth/reauthenticate is the only thing that ever
+    # moves it forward. `require_recent_auth` reads it (via the active
+    # row for the caller's session) to decide whether a sensitive action
+    # needs a fresh step-up challenge. Defaults to "now" so a brand-new
+    # family's first row (login/OAuth) needs no explicit value, matching
+    # `family_created_at`.
+    auth_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     device_info: Mapped[str | None] = mapped_column(String(255))
     ip_address: Mapped[str | None] = mapped_column(String(45))

@@ -34,15 +34,30 @@ class OAuthClient:
     redirect_uri: str
     scopes: list[str] = field(default_factory=list)
     use_pkce: bool = False
+    # Provider-specific query params that force the IdP to re-prompt for
+    # credentials, used for step-up re-authentication (#16) when the
+    # caller passes reauth=True to get_authorization_url. None means
+    # this provider has no documented mechanism to force a fresh login
+    # over an existing IdP session -- see the per-provider comments
+    # below on OAUTH_PROVIDERS for what that means in practice.
+    reauth_params: dict[str, str] | None = None
 
     # ---- Step 1: Build authorization redirect URL ----
 
-    def get_authorization_url(self, state: str) -> tuple[str, str | None]:
+    def get_authorization_url(
+        self,
+        state: str,
+        extra_params: dict[str, str] | None = None,
+    ) -> tuple[str, str | None]:
         """Return (redirect_url, code_verifier | None).
 
         code_verifier is only set when use_pkce=True (Twitter).
         Store it alongside state in Redis so the callback can send it
         in the token exchange.
+
+        extra_params, when given, is merged into the query string --
+        used to pass provider-specific params such as `prompt=login`
+        to force re-authentication for step-up flows (#16).
         """
         params: dict[str, str] = {
             "client_id": self.client_id,
@@ -52,6 +67,8 @@ class OAuthClient:
         }
         if self.scopes:
             params["scope"] = " ".join(self.scopes)
+        if extra_params:
+            params.update(extra_params)
 
         code_verifier: str | None = None
         if self.use_pkce:
@@ -116,6 +133,32 @@ class OAuthClient:
 # Provider instances
 # ---------------------------------------------------------------------------
 
+google_oauth = OAuthClient(
+    authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+    token_url="https://oauth2.googleapis.com/token",
+    userinfo_url="https://www.googleapis.com/oauth2/v2/userinfo",
+    client_id=settings.GOOGLE_CLIENT_ID,
+    client_secret=settings.GOOGLE_CLIENT_SECRET,
+    redirect_uri=settings.GOOGLE_REDIRECT_URI,
+    scopes=["openid", "email", "profile"],
+    # `prompt=login` is the standard OIDC param Google honors: it forces
+    # the account chooser / credential check regardless of an existing
+    # Google session in the browser. This is a real security guarantee
+    # for step-up reauth (#16), not best-effort.
+    reauth_params={"prompt": "login"},
+)
+
+# GitHub's OAuth authorize endpoint has no documented mechanism to force
+# re-authentication over an existing GitHub session (its `login` param
+# only pre-fills/suggests an account, it does not require re-entering
+# credentials). There is therefore no `reauth_params` set here: a
+# reauth=True request to GitHub falls back to the ordinary authorize
+# URL and is best-effort only -- if the browser still has an active
+# GitHub session, the provider may silently re-authorize without
+# prompting for credentials. This is a documented, deliberate
+# limitation of the provider, not an oversight -- see
+# test_authorize_reauth_is_best_effort_for_github in
+# tests/oauth/test_endpoints.py.
 github_oauth = OAuthClient(
     authorize_url="https://github.com/login/oauth/authorize",
     token_url="https://github.com/login/oauth/access_token",
@@ -126,16 +169,12 @@ github_oauth = OAuthClient(
     scopes=["read:user", "user:email"],
 )
 
-google_oauth = OAuthClient(
-    authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
-    token_url="https://oauth2.googleapis.com/token",
-    userinfo_url="https://www.googleapis.com/oauth2/v2/userinfo",
-    client_id=settings.GOOGLE_CLIENT_ID,
-    client_secret=settings.GOOGLE_CLIENT_SECRET,
-    redirect_uri=settings.GOOGLE_REDIRECT_URI,
-    scopes=["openid", "email", "profile"],
-)
-
+# X (Twitter)'s OAuth 2.0 authorize endpoint has no confirmed equivalent
+# either: `force_login` was an OAuth 1.0a parameter, and X's current
+# OAuth 2.0 / PKCE docs do not document it (or `prompt=login`) as
+# supported on /i/oauth2/authorize. Rather than silently claim a
+# security guarantee this provider can't back, reauth_params is left
+# unset here too -- best-effort only, same as GitHub above.
 twitter_oauth = OAuthClient(
     authorize_url="https://twitter.com/i/oauth2/authorize",
     token_url="https://api.twitter.com/2/oauth2/token",

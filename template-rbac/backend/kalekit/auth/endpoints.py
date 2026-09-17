@@ -11,12 +11,14 @@ from kalekit.auth.dependencies import (
     get_current_jti,
     get_current_session_id,
     get_current_user,
+    require_recent_auth,
 )
 from kalekit.auth.permissions import (
     block_all_user_tokens,
     block_family_tokens,
     block_token,
     cache_refresh_grace_pair,
+    consume_oauth_reauth_ticket,
     get_cached_refresh_grace_pair,
     get_redis,
     get_scopes_for_roles,
@@ -27,6 +29,7 @@ from kalekit.auth.repository import (
     create_user,
     create_verification_token,
     find_user_by_email,
+    get_active_refresh_token_by_family,
     get_family_owner,
     get_refresh_token_by_hash,
     get_refresh_token_by_id,
@@ -35,6 +38,7 @@ from kalekit.auth.repository import (
     invalidate_user_verification_tokens,
     list_user_sessions,
     mark_refresh_token_replaced,
+    mark_session_reauthenticated,
     mark_verification_token_used,
     revoke_refresh_token_family,
     revoke_user_refresh_tokens,
@@ -48,6 +52,7 @@ from kalekit.auth.schemas import (
     LoginRequest,
     LogoutRequest,
     MessageResponse,
+    ReauthenticateRequest,
     RefreshRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -422,6 +427,7 @@ async def refresh(
         user_id=user.id,
         family_id=token_row.family_id,
         family_created_at=token_row.family_created_at,
+        auth_time=token_row.auth_time,
         token_hash=hash_refresh_token(new_refresh),
         expires_at=new_expires_at,
         client=client,
@@ -510,7 +516,7 @@ async def list_sessions(
 @router.delete("/sessions/{session_id}", status_code=204)
 async def revoke_session(
     session_id: uuid.UUID,
-    user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(require_recent_auth())],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     """Revoke one of the caller's own sessions (a refresh token
@@ -533,7 +539,7 @@ async def revoke_session(
 @router.post("/change-password", response_model=MessageResponse)
 async def change_password(
     body: ChangePasswordRequest,
-    user: Annotated[User, Depends(get_current_user)],
+    user: Annotated[User, Depends(require_recent_auth())],
     session_id: Annotated[str | None, Depends(get_current_session_id)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
@@ -581,6 +587,136 @@ async def change_password(
         await block_all_user_tokens(str(user.id))
 
     return MessageResponse(detail="Password changed")
+
+
+@router.post("/reauthenticate", response_model=MessageResponse)
+async def reauthenticate(
+    body: ReauthenticateRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    session_id: Annotated[str | None, Depends(get_current_session_id)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    """Step-up re-authentication (#16): prove identity again, right now,
+    without ending or rotating the caller's existing session -- this is
+    what lets `require_recent_auth`-gated actions succeed again within
+    the freshness window, no new token pair needed.
+
+    Deliberately does NOT use `require_recent_auth` itself (that would
+    be circular -- the whole point is to *establish* a recent auth_time,
+    not require one already exists) and instead depends directly on
+    `get_current_user`, same as every other authenticated-but-not-yet-
+    stepped-up endpoint.
+    """
+    # Validate there's an active session to update *before* checking
+    # either credential -- in particular before consuming the OAuth
+    # ticket below, which is single-use. Checking this first means a
+    # missing/expired/malformed session never burns the caller's ticket
+    # on a request that was going to fail anyway; they can retry the
+    # (still-valid) ticket once they have a real session, instead of
+    # being forced to redo the whole provider re-login.
+    #
+    # `sid` is required here (unlike change-password's best-effort
+    # handling): there's no "fall back to blocking everything" option
+    # for advancing a session's auth_time -- without a real family to
+    # update, there is nothing to step up, so fail closed with a plain
+    # 400 rather than silently no-op.
+    try:
+        family_id = uuid.UUID(session_id) if session_id else None
+    except ValueError:
+        family_id = None
+    if family_id is None:
+        raise HTTPException(
+            status_code=400, detail="No active session to re-authenticate"
+        )
+
+    token_row = await get_active_refresh_token_by_family(session, family_id)
+    if token_row is None or token_row.user_id != user.id:
+        raise HTTPException(
+            status_code=400, detail="No active session to re-authenticate"
+        )
+
+    if user.password_hash is not None:
+        # Explicit None-check, not truthiness: `password_hash` is
+        # nullable to mean "OAuth-only, no password set" (see
+        # models/user.py) -- a merely-falsy-but-non-null value (e.g. a
+        # corrupted empty string) should still take the password branch
+        # below rather than being silently treated as OAuth-only.
+        #
+        # Rate limit password guesses against this account. This is the
+        # scenario step-up reauth exists to defend against in the first
+        # place: an attacker holding a *stolen access token* (but not
+        # the actual password) hitting this endpoint to brute-force the
+        # password and then legitimately step up the hijacked session --
+        # without a limit here, that would defeat #16 entirely. Keyed on
+        # the authenticated user's id (not email) since, unlike /login,
+        # this endpoint already requires a valid existing session --
+        # there's no unauthenticated caller to avoid fingerprinting via
+        # account enumeration.
+        account_key = f"reauth_rate:account:{user.id}"
+        r = None
+        if settings.RATE_LIMIT_ENABLED:
+            r = await get_redis()
+            # Peek (don't increment) -- only an actual failed attempt
+            # below should consume this budget, so a request that goes
+            # on to succeed must not have already spent a unit of it
+            # just by arriving. Same peek-then-increment-on-failure
+            # shape as /auth/login's account limit.
+            current_failures = await r.get(account_key)
+            if current_failures:
+                account_ttl = await r.ttl(account_key)
+                if account_ttl == -1:
+                    # Recover a key that somehow lost its expiry (e.g. a
+                    # crash between a prior INCR and its EXPIRE) instead
+                    # of blocking this account forever -- same TTL
+                    # recovery check_and_increment does, needed here too
+                    # since this peek path never calls it.
+                    account_ttl = settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                    await r.expire(account_key, account_ttl)
+                if int(current_failures) >= settings.REAUTH_RATE_LIMIT_PER_ACCOUNT:
+                    raise _rate_limited(account_ttl)
+
+        # Password users: re-enter it, same check as change-password.
+        if not body.password or not verify_password(
+            body.password, user.password_hash
+        ):
+            if r is not None:
+                await check_and_increment(
+                    r,
+                    account_key,
+                    limit=settings.REAUTH_RATE_LIMIT_PER_ACCOUNT,
+                    window_seconds=settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
+                )
+            raise HTTPException(
+                status_code=401, detail="Current password is incorrect"
+            )
+        if r is not None:
+            # A successful reauth clears any accumulated failure count
+            # for this account -- the limit is meant to slow down
+            # guessing, not to keep locking out someone who just proved
+            # they have the right password.
+            await r.delete(account_key)
+    else:
+        # OAuth-only users have no password to re-enter -- "complete a
+        # fresh provider login" instead (see oauth_authorize's `reauth`
+        # param and oauth_callback's ticket-minting branch). Checking
+        # the ticket names *this* user (not merely that it's valid)
+        # stops one browser tab's fresh OAuth login from stepping up a
+        # different user's already-authenticated session.
+        if not body.oauth_ticket:
+            raise HTTPException(
+                status_code=400,
+                detail="OAuth re-authentication required for this account",
+            )
+        ticket_user_id = await consume_oauth_reauth_ticket(body.oauth_ticket)
+        if ticket_user_id is None or ticket_user_id != str(user.id):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired re-authentication ticket",
+            )
+
+    await mark_session_reauthenticated(session, token_row)
+
+    return MessageResponse(detail="Re-authenticated")
 
 
 @router.get("/me", response_model=UserResponse)
