@@ -156,8 +156,8 @@ async def _ensure_role_permissions(
 
     This reconciles rather than only acting on a never-seeded role: a
     role that was seeded before with a smaller permission list (or
-    before a `Scope` this role's `"*"` wildcard now covers existed)
-    picks up the newly-added permissions the next time this runs,
+    before a `Scope` that this role's `"*"` wildcard now covers even
+    existed) picks up the newly-added permissions the next time this runs,
     matching `roles.yaml`'s own claim that editing it and redeploying
     is enough to change what a role can do. Permissions removed from
     the file are deliberately left alone -- additive-only, consistent
