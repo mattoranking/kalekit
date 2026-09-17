@@ -98,9 +98,15 @@ async def prune_refresh_tokens_cli(older_than_days: int) -> None:
 
     try:
         async with sessionmaker() as session:
-            deleted = await prune_refresh_tokens(
-                session, older_than_days=older_than_days
-            )
+            try:
+                deleted = await prune_refresh_tokens(
+                    session, older_than_days=older_than_days
+                )
+            except ValueError as exc:
+                # e.g. a negative --older-than-days -- surface this as a
+                # clean operator-facing error instead of a raw traceback.
+                print(f"Error: {exc}", file=sys.stderr)
+                raise SystemExit(1) from exc
             await session.commit()
             print(f"Deleted {deleted} dead refresh token row(s).")
     finally:

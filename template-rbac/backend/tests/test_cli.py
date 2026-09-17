@@ -256,6 +256,23 @@ async def test_prune_refresh_tokens_cli_deletes_old_dead_rows_and_reports_count(
     assert "1" in printed
 
 
+@pytest.mark.asyncio(loop_scope="session")
+async def test_prune_refresh_tokens_cli_exits_cleanly_for_negative_window(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    """A negative --older-than-days must surface as a clean,
+    operator-facing error (message on stderr, non-zero exit) --  not
+    a raw ValueError traceback out of prune_refresh_tokens."""
+    with pytest.raises(SystemExit) as exc_info:
+        await _prune_refresh_tokens_cli(-5)
+
+    assert exc_info.value.code != 0
+
+    captured = capsys.readouterr()
+    assert "Deleted" not in captured.out
+    assert captured.err.strip() != ""
+
+
 def test_generate_secret_replaces_existing_line_in_place(tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text(
