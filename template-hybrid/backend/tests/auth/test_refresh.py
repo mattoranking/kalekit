@@ -85,6 +85,34 @@ async def test_reuse_after_grace_window_revokes_the_family(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_malformed_grace_cache_entry_fails_closed_instead_of_500(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A grace-window cache hit whose value doesn't have the shape
+    TokenResponse expects (corrupted/unexpected Redis data) must be
+    treated the same as a cache miss -- a clean 401 -- rather than
+    letting the Pydantic validation error surface as an unhandled 500.
+    """
+    import kalekit.auth.endpoints as auth_endpoints
+
+    _, refresh_token = await _login_pair(client, "malformed-cache@example.com")
+
+    first = await _refresh(client, refresh_token)
+    assert first.status_code == 200
+
+    async def _malformed_cached_pair(_old_hash: str) -> dict:
+        return {"unexpected": "shape"}
+
+    monkeypatch.setattr(
+        auth_endpoints, "get_cached_refresh_grace_pair", _malformed_cached_pair
+    )
+
+    replay = await _refresh(client, refresh_token)
+    assert replay.status_code == 401
+    assert replay.json()["detail"] == "Refresh token already used"
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_reuse_of_token_older_than_direct_predecessor_revokes_family(
     client: AsyncClient,
 ) -> None:

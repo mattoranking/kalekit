@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.blocklist import (
@@ -156,7 +157,20 @@ async def refresh(
         if is_direct_predecessor and within_grace_window:
             cached = await get_cached_refresh_grace_pair(presented_hash)
             if cached is not None:
-                return TokenResponse(**cached)
+                try:
+                    return TokenResponse(**cached)
+                except (TypeError, ValidationError):
+                    # The cache entry parsed as JSON and is a dict (see
+                    # get_cached_refresh_grace_pair), but doesn't have
+                    # the shape TokenResponse expects -- corrupted or
+                    # unexpected Redis data. Fall through to the same
+                    # "cache entry expired/evicted" handling below
+                    # rather than letting an unhandled validation error
+                    # 500 this request; this should never happen in
+                    # practice, since the only writer
+                    # (cache_refresh_grace_pair) always stores a real
+                    # TokenResponse.model_dump().
+                    pass
             # Cache entry expired/evicted -- ambiguous, so fail closed
             # for this request without punishing the whole family: a
             # concurrent legitimate refresh may simply have to retry.
