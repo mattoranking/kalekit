@@ -48,65 +48,51 @@ async def _spy_on_mget(monkeypatch: pytest.MonkeyPatch) -> _CallCountingSpy:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_is_any_blocked_issues_a_single_round_trip(
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        frozenset(),
+        frozenset({"jti"}),
+        frozenset({"user"}),
+        frozenset({"family"}),
+        frozenset({"jti", "user"}),
+        frozenset({"jti", "family"}),
+        frozenset({"user", "family"}),
+        frozenset({"jti", "user", "family"}),
+    ],
+    ids=[
+        "none-blocked",
+        "jti-only",
+        "user-only",
+        "family-only",
+        "jti-and-user",
+        "jti-and-family",
+        "user-and-family",
+        "all-three",
+    ],
+)
+async def test_is_any_blocked_covers_every_combination_of_blocked_ids(
     monkeypatch: pytest.MonkeyPatch,
+    blocked: frozenset[str],
 ) -> None:
+    """With all three ids present on the token, every one of the 8
+    subsets of {jti, user, family} that could independently be blocked
+    must still resolve correctly (True iff at least one of the
+    *blocked* ones is in the subset) in exactly one Redis round-trip.
+    """
+    jti, user_id, family_id = "jti-x", "user-x", "family-x"
+    if "jti" in blocked:
+        await block_token(jti)
+    if "user" in blocked:
+        await block_all_user_tokens(user_id)
+    if "family" in blocked:
+        await block_family_tokens(family_id)
+
     spy = await _spy_on_mget(monkeypatch)
 
-    result = await is_any_blocked("jti-1", "user-1", "family-1")
+    result = await is_any_blocked(jti, user_id, family_id)
 
-    assert result is False
-    assert spy.await_count == 1
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_is_any_blocked_true_when_only_jti_is_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await block_token("jti-2")
-    spy = await _spy_on_mget(monkeypatch)
-
-    result = await is_any_blocked("jti-2", "user-2", "family-2")
-
-    assert result is True
-    assert spy.await_count == 1
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_is_any_blocked_true_when_only_user_is_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await block_all_user_tokens("user-3")
-    spy = await _spy_on_mget(monkeypatch)
-
-    result = await is_any_blocked("jti-3", "user-3", "family-3")
-
-    assert result is True
-    assert spy.await_count == 1
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_is_any_blocked_true_when_only_family_is_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await block_family_tokens("family-4")
-    spy = await _spy_on_mget(monkeypatch)
-
-    result = await is_any_blocked("jti-4", "user-4", "family-4")
-
-    assert result is True
-    assert spy.await_count == 1
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_is_any_blocked_false_when_nothing_blocked(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spy = await _spy_on_mget(monkeypatch)
-
-    result = await is_any_blocked("jti-5", "user-5", "family-5")
-
-    assert result is False
+    assert result is (len(blocked) > 0)
     assert spy.await_count == 1
 
 
@@ -116,17 +102,14 @@ async def test_is_any_blocked_skips_none_ids_rather_than_treating_them_as_blocke
 ) -> None:
     """A missing jti/user_id/sid must simply not be checked -- same as
     the `if jti and ...` guards this replaces -- not spuriously counted
-    as blocked or not blocked either way."""
-    # Block a user id that happens to equal None-ish sentinel is not
-    # possible; instead prove the None branch is never queried by
-    # blocking a value that would only be blocked if the guard were
-    # broken (e.g. querying "blocked_user:None").
+    as blocked or not blocked either way. With every id absent, there is
+    nothing to check at all, so no Redis round-trip should happen
+    either (asserted below via the spy's call count)."""
     spy = await _spy_on_mget(monkeypatch)
 
     result = await is_any_blocked(None, None, None)
 
     assert result is False
-    # No ids at all -- nothing to check, so no Redis round-trip either.
     assert spy.await_count == 0
 
 
