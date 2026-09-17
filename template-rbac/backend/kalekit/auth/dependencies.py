@@ -8,9 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from kalekit.auth.client_type import ClientType
 from kalekit.auth.permissions import (
     get_scopes_for_roles,
-    is_family_blocked,
-    is_token_blocked,
-    is_user_blocked,
+    is_any_blocked,
 )
 from kalekit.config import settings
 from kalekit.models.user import User
@@ -101,11 +99,7 @@ async def get_current_user(
     jti = payload.get("jti")
     sid = payload.get("sid")
 
-    if jti and await is_token_blocked(jti):
-        raise HTTPException(status_code=401, detail="Token has been revoked")
-    if user_id and await is_user_blocked(user_id):
-        raise HTTPException(status_code=401, detail="Token has been revoked")
-    if sid and await is_family_blocked(sid):
+    if await is_any_blocked(jti, user_id, sid):
         raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = await session.get(User, user_id)
