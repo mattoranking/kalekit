@@ -1,26 +1,18 @@
 import pytest
 from httpx import AsyncClient
 
-
-async def _invite(client, org, inviter_token, email, role, auth_header):
-    response = await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": email, "role": role},
-        headers=auth_header(inviter_token),
-    )
-    assert response.status_code == 201, response.text
+from kalekit.models.organization import MemberRole
 
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_viewer_can_read_but_not_post(
-    client: AsyncClient, register, login, auth_header, org_id_for
+    client: AsyncClient, register, login, auth_header, org_id_for, add_member
 ) -> None:
     await register("owner@example.com")
     await register("viewer@example.com")
-    token_owner = await login("owner@example.com")
     token_viewer = await login("viewer@example.com")
     org = await org_id_for("owner@example.com")
-    await _invite(client, org, token_owner, "viewer@example.com", "viewer", auth_header)
+    await add_member(org, token_viewer, "viewer@example.com", role=MemberRole.viewer)
 
     response = await client.get(
         f"/v1/organizations/{org}/chat/", headers=auth_header(token_viewer)
@@ -37,14 +29,13 @@ async def test_viewer_can_read_but_not_post(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_member_can_post_and_delete_own_message(
-    client: AsyncClient, register, login, auth_header, org_id_for
+    client: AsyncClient, register, login, auth_header, org_id_for, add_member
 ) -> None:
     await register("owner@example.com")
     await register("member@example.com")
-    token_owner = await login("owner@example.com")
     token_member = await login("member@example.com")
     org = await org_id_for("owner@example.com")
-    await _invite(client, org, token_owner, "member@example.com", "member", auth_header)
+    await add_member(org, token_member, "member@example.com", role=MemberRole.member)
 
     response = await client.post(
         f"/v1/organizations/{org}/chat/",
@@ -63,20 +54,19 @@ async def test_member_can_post_and_delete_own_message(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_member_cannot_delete_others_message(
-    client: AsyncClient, register, login, auth_header, org_id_for
+    client: AsyncClient, register, login, auth_header, org_id_for, add_member
 ) -> None:
     await register("owner@example.com")
     await register("member-one@example.com")
     await register("member-two@example.com")
-    token_owner = await login("owner@example.com")
     token_member_one = await login("member-one@example.com")
     token_member_two = await login("member-two@example.com")
     org = await org_id_for("owner@example.com")
-    await _invite(
-        client, org, token_owner, "member-one@example.com", "member", auth_header
+    await add_member(
+        org, token_member_one, "member-one@example.com", role=MemberRole.member
     )
-    await _invite(
-        client, org, token_owner, "member-two@example.com", "member", auth_header
+    await add_member(
+        org, token_member_two, "member-two@example.com", role=MemberRole.member
     )
 
     response = await client.post(
@@ -96,14 +86,14 @@ async def test_member_cannot_delete_others_message(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_owner_can_delete_anyones_message(
-    client: AsyncClient, register, login, auth_header, org_id_for
+    client: AsyncClient, register, login, auth_header, org_id_for, add_member
 ) -> None:
     await register("owner@example.com")
     await register("member@example.com")
     token_owner = await login("owner@example.com")
     token_member = await login("member@example.com")
     org = await org_id_for("owner@example.com")
-    await _invite(client, org, token_owner, "member@example.com", "member", auth_header)
+    await add_member(org, token_member, "member@example.com", role=MemberRole.member)
 
     response = await client.post(
         f"/v1/organizations/{org}/chat/",

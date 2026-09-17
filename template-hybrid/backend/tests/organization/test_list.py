@@ -1,5 +1,7 @@
 import pytest
 
+from kalekit.models.organization import MemberRole
+
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_list_my_organizations_reports_role(
@@ -44,20 +46,15 @@ async def test_list_my_organizations_only_returns_own_memberships(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_list_my_organizations_reflects_invited_role(
-    client, register, login, auth_header, org_id_for
+    client, register, login, auth_header, org_id_for, add_member
 ) -> None:
     await register("owner@example.com")
     await register("admin@example.com")
-    token_owner = await login("owner@example.com")
+    token_admin = await login("admin@example.com")
     org = await org_id_for("owner@example.com")
 
-    await client.post(
-        f"/v1/organizations/{org}/members",
-        json={"email": "admin@example.com", "role": "admin"},
-        headers=auth_header(token_owner),
-    )
+    await add_member(org, token_admin, "admin@example.com", role=MemberRole.admin)
 
-    token_admin = await login("admin@example.com")
     response = await client.get("/v1/organizations", headers=auth_header(token_admin))
 
     assert response.status_code == 200

@@ -1,10 +1,12 @@
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.models.organization import MemberRole, Organization, OrganizationMember
+from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.models.user import User
 from kalekit.utils.db.tenancy import tenant_filter
 
@@ -14,6 +16,18 @@ async def create_organization(session: AsyncSession, *, name: str) -> Organizati
     session.add(organization)
     await session.flush()
     return organization
+
+
+async def get_member(
+    session: AsyncSession, *, organization_id: uuid.UUID, user_id: uuid.UUID
+) -> OrganizationMember | None:
+    result = await session.execute(
+        select(OrganizationMember).where(
+            tenant_filter(OrganizationMember, organization_id=organization_id),
+            OrganizationMember.user_id == user_id,
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 async def add_member(
@@ -31,13 +45,9 @@ async def add_member(
     the check itself. Returns `(member, created)`; a caller that must
     surface a 409 for an existing membership can key off `created`.
     """
-    existing = await session.execute(
-        select(OrganizationMember).where(
-            tenant_filter(OrganizationMember, organization_id=organization_id),
-            OrganizationMember.user_id == user_id,
-        )
+    member = await get_member(
+        session, organization_id=organization_id, user_id=user_id
     )
-    member = existing.scalar_one_or_none()
     if member is not None:
         return member, False
 
@@ -49,13 +59,9 @@ async def add_member(
         await session.flush()
     except IntegrityError:
         await session.rollback()
-        existing = await session.execute(
-            select(OrganizationMember).where(
-                tenant_filter(OrganizationMember, organization_id=organization_id),
-                OrganizationMember.user_id == user_id,
-            )
+        member = await get_member(
+            session, organization_id=organization_id, user_id=user_id
         )
-        member = existing.scalar_one_or_none()
         if member is None:
             # Not the uniqueness violation we expected -- e.g. a stale
             # organization_id/user_id hitting a FK constraint. Re-raise
@@ -75,3 +81,57 @@ async def list_members(
         .where(tenant_filter(OrganizationMember, organization_id=organization_id))
     )
     return list(result.all())
+
+
+async def create_invitation(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    email: str,
+    role: MemberRole,
+    token_hash: str,
+    invited_by: uuid.UUID | None,
+    expires_at: datetime,
+) -> OrganizationInvitation:
+    invitation = OrganizationInvitation(
+        organization_id=organization_id,
+        # Normalized here, not by callers -- `accept_invitation`'s
+        # `user.email.lower() != invitation.email` comparison relies on
+        # stored emails always being lowercase, and that invariant
+        # should hold at the one place that writes the row rather than
+        # depend on every caller remembering to lowercase first.
+        email=email.lower(),
+        role=role,
+        token_hash=token_hash,
+        invited_by=invited_by,
+        expires_at=expires_at,
+    )
+    session.add(invitation)
+    await session.flush()
+    return invitation
+
+
+async def get_valid_invitation_by_token_hash(
+    session: AsyncSession, token_hash: str
+) -> OrganizationInvitation | None:
+    """A token is valid iff it exists, is unused, and hasn't expired."""
+    result = await session.execute(
+        select(OrganizationInvitation).where(
+            OrganizationInvitation.token_hash == token_hash
+        )
+    )
+    invitation = result.scalar_one_or_none()
+    if invitation is None:
+        return None
+    if invitation.accepted_at is not None:
+        return None
+    if invitation.expires_at < datetime.now(timezone.utc):
+        return None
+    return invitation
+
+
+async def mark_invitation_accepted(
+    session: AsyncSession, invitation: OrganizationInvitation
+) -> None:
+    invitation.accepted_at = datetime.now(timezone.utc)
+    await session.flush()
