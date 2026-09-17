@@ -261,10 +261,14 @@ async def consume_oauth_reauth_ticket(ticket: str) -> str | None:
     single-use shape as /oauth/exchange's code, so a leaked or replayed
     ticket can't grant step-up access twice.
 
-    Uses GETDEL (atomic since Redis 6.2) rather than a separate GET +
-    DELETE -- two concurrent consumers hitting GET-then-DELETE could
-    otherwise both read the ticket before either deleted it, letting it
-    be replayed once per racing caller instead of truly single-use.
+    Uses GETDEL (atomic) rather than a separate GET + DELETE -- two
+    concurrent consumers hitting GET-then-DELETE could otherwise both
+    read the ticket before either deleted it, letting it be replayed
+    once per racing caller instead of truly single-use.
+
+    Requires Redis >= 6.2 (GETDEL was added in that release); this
+    template pins `redis:7-alpine` in compose.yml, well above that
+    floor, so no older-Redis fallback is provided here.
     """
     r = await get_redis()
     key = f"{_OAUTH_REAUTH_PREFIX}{ticket}"

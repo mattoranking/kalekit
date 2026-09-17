@@ -607,14 +607,66 @@ async def reauthenticate(
     `get_current_user`, same as every other authenticated-but-not-yet-
     stepped-up endpoint.
     """
-    if user.password_hash:
+    if user.password_hash is not None:
+        # Explicit None-check, not truthiness: `password_hash` is
+        # nullable to mean "OAuth-only, no password set" (see
+        # models/user.py) -- a merely-falsy-but-non-null value (e.g. a
+        # corrupted empty string) should still take the password branch
+        # below rather than being silently treated as OAuth-only.
+        #
+        # Rate limit password guesses against this account. This is the
+        # scenario step-up reauth exists to defend against in the first
+        # place: an attacker holding a *stolen access token* (but not
+        # the actual password) hitting this endpoint to brute-force the
+        # password and then legitimately step up the hijacked session --
+        # without a limit here, that would defeat #16 entirely. Keyed on
+        # the authenticated user's id (not email) since, unlike /login,
+        # this endpoint already requires a valid existing session --
+        # there's no unauthenticated caller to avoid fingerprinting via
+        # account enumeration.
+        account_key = f"reauth_rate:account:{user.id}"
+        r = None
+        if settings.RATE_LIMIT_ENABLED:
+            r = await get_redis()
+            # Peek (don't increment) -- only an actual failed attempt
+            # below should consume this budget, so a request that goes
+            # on to succeed must not have already spent a unit of it
+            # just by arriving. Same peek-then-increment-on-failure
+            # shape as /auth/login's account limit.
+            current_failures = await r.get(account_key)
+            if current_failures:
+                account_ttl = await r.ttl(account_key)
+                if account_ttl == -1:
+                    # Recover a key that somehow lost its expiry (e.g. a
+                    # crash between a prior INCR and its EXPIRE) instead
+                    # of blocking this account forever -- same TTL
+                    # recovery check_and_increment does, needed here too
+                    # since this peek path never calls it.
+                    account_ttl = settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                    await r.expire(account_key, account_ttl)
+                if int(current_failures) >= settings.REAUTH_RATE_LIMIT_PER_ACCOUNT:
+                    raise _rate_limited(account_ttl)
+
         # Password users: re-enter it, same check as change-password.
         if not body.password or not verify_password(
             body.password, user.password_hash
         ):
+            if r is not None:
+                await check_and_increment(
+                    r,
+                    account_key,
+                    limit=settings.REAUTH_RATE_LIMIT_PER_ACCOUNT,
+                    window_seconds=settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
+                )
             raise HTTPException(
                 status_code=401, detail="Current password is incorrect"
             )
+        if r is not None:
+            # A successful reauth clears any accumulated failure count
+            # for this account -- the limit is meant to slow down
+            # guessing, not to keep locking out someone who just proved
+            # they have the right password.
+            await r.delete(account_key)
     else:
         # OAuth-only users have no password to re-enter -- "complete a
         # fresh provider login" instead (see oauth_authorize's `reauth`

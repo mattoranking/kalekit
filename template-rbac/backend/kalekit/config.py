@@ -234,6 +234,22 @@ class Settings(BaseSettings):
     # mobile or admin.
     REAUTH_MAX_AGE_MINUTES: int = 10
 
+    # POST /auth/reauthenticate (#16): a stolen access token (without
+    # the account's actual password) is exactly the attacker this
+    # endpoint's password branch has to defend against -- unlimited
+    # guesses here would let that attacker brute-force the password and
+    # then legitimately step up the stolen session, defeating step-up
+    # reauth entirely. Kept intentionally tighter than login's account
+    # limit (3 attempts here vs. login's 5, same 15-minute window): the
+    # caller already holds a valid session here, so there's no "forgot
+    # my password" traffic to accommodate -- a real user only reaches
+    # this endpoint moments after using their password to log in in the
+    # first place. Guarded the same way login's account limit is, by
+    # the shared RATE_LIMIT_ENABLED / TRUST_PROXY_HEADERS settings
+    # defined above under "Rate limiting".
+    REAUTH_RATE_LIMIT_PER_ACCOUNT: int = 3
+    REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS: int = 900  # 15 minutes
+
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 

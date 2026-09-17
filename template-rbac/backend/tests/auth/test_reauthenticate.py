@@ -369,3 +369,83 @@ async def test_oauth_reauth_callback_puts_ticket_before_fragment(
     assert list(query.keys()) == ["reauth_ticket"]
     # And it comes before the fragment in the raw string.
     assert location.index("reauth_ticket") < location.index("#security")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_repeated_failed_reauth_attempts_are_rate_limited(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: without this, an attacker holding a *stolen
+    access token* (but not the account's password) could hit
+    /auth/reauthenticate with unlimited password guesses to brute-force
+    it and then legitimately step up the hijacked session -- defeating
+    #16 entirely. Mirrors /auth/login's per-account rate-limit test."""
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "REAUTH_RATE_LIMIT_PER_ACCOUNT", 3)
+
+    email = "reauth-bruteforced@example.com"
+    access_token, _ = await _login_pair(client, email)
+
+    for _ in range(3):
+        response = await client.post(
+            "/v1/auth/reauthenticate",
+            headers=_auth(access_token),
+            json={"password": "wrong-password"},
+        )
+        assert response.status_code == 401
+
+    blocked = await client.post(
+        "/v1/auth/reauthenticate",
+        headers=_auth(access_token),
+        json={"password": "wrong-password"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+
+    # Even the *correct* password is blocked while the account is
+    # rate-limited -- the whole point is to slow down guessing
+    # regardless of whether the next guess happens to be right.
+    still_blocked = await client.post(
+        "/v1/auth/reauthenticate",
+        headers=_auth(access_token),
+        json={"password": "password123"},
+    )
+    assert still_blocked.status_code == 429
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_successful_reauth_clears_the_account_failure_count(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "REAUTH_RATE_LIMIT_PER_ACCOUNT", 2)
+
+    email = "reauth-recovers@example.com"
+    access_token, _ = await _login_pair(client, email)
+
+    # One failure, then a success -- should reset the counter rather
+    # than leave it at 1/2.
+    fail = await client.post(
+        "/v1/auth/reauthenticate",
+        headers=_auth(access_token),
+        json={"password": "wrong-password"},
+    )
+    assert fail.status_code == 401
+
+    success = await client.post(
+        "/v1/auth/reauthenticate",
+        headers=_auth(access_token),
+        json={"password": "password123"},
+    )
+    assert success.status_code == 200
+
+    # Two more failures shouldn't be blocked yet -- if the counter
+    # hadn't been cleared, this would already be the 3rd failure
+    # against a limit of 2.
+    for _ in range(2):
+        response = await client.post(
+            "/v1/auth/reauthenticate",
+            headers=_auth(access_token),
+            json={"password": "wrong-password"},
+        )
+        assert response.status_code == 401
