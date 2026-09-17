@@ -130,18 +130,26 @@ async def change_member_role(
     organization_id: uuid.UUID,
     user_id: uuid.UUID,
     role: MemberRole,
-    caller_role: MemberRole | None = None,
+    caller_role: MemberRole,
 ) -> OrganizationMember | None:
     """Changes `user_id`'s role within `organization_id`.
 
     Locks the organization row first (see `_lock_organization`), then
     re-reads the target's *current* role under that lock, before doing
-    anything else -- including authorization. `caller_role`, if given,
-    is checked against that fresh read (not whatever the endpoint saw
-    in an earlier, unlocked fetch): the caller must hold
+    anything else -- including authorization. `caller_role` is checked
+    against that fresh read (not whatever the endpoint saw in an
+    earlier, unlocked fetch): the caller must hold
     `members:grant:<target's current role>` to act on them at all, and
     `members:grant:<role>` to grant the new role. Raises
     `NotPermittedError` if either check fails.
+
+    Required (unlike `remove_member`'s optional `caller_role`) -- a
+    role change always has both an actor and a role being granted, so
+    there's no legitimate self-acting case (like `remove_member`'s use
+    from `/leave`) where skipping this check would make sense. Making
+    it required here means a future call site that forgets to pass it
+    fails loudly (`TypeError`) instead of silently skipping
+    authorization.
 
     This ordering matters -- checking authorization before acquiring
     the lock (or against a pre-lock read) would let a caller who was
@@ -174,11 +182,10 @@ async def change_member_role(
     if member is None:
         return None
 
-    if caller_role is not None:
-        if not role_has_permission(
-            caller_role, f"members:grant:{member.role.value}"
-        ) or not role_has_permission(caller_role, f"members:grant:{role.value}"):
-            raise NotPermittedError()
+    if not role_has_permission(
+        caller_role, f"members:grant:{member.role.value}"
+    ) or not role_has_permission(caller_role, f"members:grant:{role.value}"):
+        raise NotPermittedError()
 
     if member.role == MemberRole.owner and role != MemberRole.owner:
         owner_count = await _count_owners(session, organization_id=organization_id)
