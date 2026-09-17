@@ -1,6 +1,7 @@
 """Invitation token generation/hashing, ported from RBAC's
-email-verification-token pattern (`auth/service.py`: `generate_verification_token`
-/ `hash_verification_token` / `verification_token_expiry`)."""
+email-verification-token pattern (RBAC template's `auth/service.py`:
+`generate_verification_token` / `hash_verification_token` /
+`verification_token_expiry` -- not a file in this template)."""
 
 import hashlib
 import secrets
