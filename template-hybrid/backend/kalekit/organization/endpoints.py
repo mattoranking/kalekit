@@ -16,15 +16,20 @@ from kalekit.config import settings
 from kalekit.models.organization import Organization
 from kalekit.models.user import User
 from kalekit.organization.repository import (
+    LastOwnerError,
+    NotPermittedError,
     add_member,
+    change_member_role,
     create_invitation,
     get_member,
     get_valid_invitation_by_token_hash,
     list_members,
     mark_invitation_accepted,
+    remove_member,
 )
 from kalekit.organization.schemas import (
     AcceptInvitationRequest,
+    ChangeMemberRoleRequest,
     InvitationAckResponse,
     InviteMemberRequest,
     MemberListResponse,
@@ -89,6 +94,152 @@ async def get_members(
             for uid, email, role in rows
         ]
     )
+
+
+@router.patch("/members/{user_id}", response_model=MemberResponse)
+async def change_organization_member_role(
+    organization_id: UUID,
+    user_id: UUID,
+    body: ChangeMemberRoleRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    caller: Annotated[OrgActor, Depends(require_org_permission("members:manage"))],
+) -> MemberResponse:
+    """Changes `user_id`'s role within the organization.
+
+    Governed by the same "cannot act on or grant a role above your
+    own" rule as inviting (#29): the caller must be able to grant the
+    *new* role (`members:grant:<new role>`) -- an admin can never
+    produce an owner -- and must also be able to grant the member's
+    *current* role, which is what stands in for "can this caller act
+    on someone at this role at all" (only an owner holds
+    `members:grant:owner`, so only an owner can touch another owner,
+    including demoting them).
+
+    That authorization check is done *inside* `change_member_role`,
+    against the target's role as re-read under the organization row's
+    lock -- not against an earlier, unlocked fetch here. Checking here
+    instead would open a real privilege-escalation race: the caller
+    could be authorized against a target who was e.g. `member` at
+    check time, then have a concurrent request promote that same
+    target to `owner` before this request's mutation actually runs,
+    letting an admin who was never authorized to touch an owner act on
+    one anyway. See `change_member_role`'s and `NotPermittedError`'s
+    docstrings.
+
+    Refuses (409) any change that would leave the organization with
+    zero owners -- including an owner demoting themselves. See
+    `change_member_role`'s docstring for the concurrency-safe
+    last-owner check.
+    """
+    try:
+        member = await change_member_role(
+            session,
+            organization_id=organization_id,
+            user_id=user_id,
+            role=body.role,
+            caller_role=caller.role,
+        )
+    except NotPermittedError:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot act on or grant a role above your own",
+        )
+    except LastOwnerError:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot demote the organization's last owner",
+        )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Fetched directly rather than via `member.user` -- that relationship
+    # is lazy-loaded and would require an extra awaited refresh in an
+    # async context; a direct `session.get` is simpler here.
+    target_user = await session.get(User, user_id)
+    return MemberResponse(
+        user_id=member.user_id,
+        email=target_user.email if target_user else None,
+        role=member.role,
+    )
+
+
+@router.delete("/members/{user_id}", status_code=204)
+async def remove_organization_member(
+    organization_id: UUID,
+    user_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    caller: Annotated[OrgActor, Depends(require_org_permission("members:manage"))],
+) -> None:
+    """Removes `user_id` from the organization.
+
+    Same "cannot act on a role above your own" rule as role changes
+    above: only an owner can remove another owner. An admin/owner
+    removing *themselves* via this route works the same as removing
+    anyone else -- they're gated on `members:manage`, which they've
+    already satisfied, and (being an owner or admin) always passes the
+    act-on check against their own current role.
+
+    That check runs inside `remove_member`, against the target's role
+    re-read under the organization row's lock rather than an earlier
+    unlocked fetch here -- see `change_organization_member_role`'s
+    docstring for why an unlocked pre-check is a real
+    privilege-escalation race, not just a theoretical concern.
+
+    Refuses (409) to remove the organization's last owner -- an org
+    must never reach zero owners through this API. 404 if `user_id`
+    isn't currently a member.
+    """
+    try:
+        member = await remove_member(
+            session,
+            organization_id=organization_id,
+            user_id=user_id,
+            caller_role=caller.role,
+        )
+    except NotPermittedError:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot act on a member with a role above your own",
+        )
+    except LastOwnerError:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot remove the organization's last owner",
+        )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@router.post("/leave", status_code=204)
+async def leave_organization(
+    organization_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    user: Annotated[User, Depends(require_org_member)],
+) -> None:
+    """Removes the caller from the organization. Open to any role --
+    unlike removing *someone else*, leaving yourself needs no
+    `members:manage` permission check, and there's no "act on a role
+    above your own" question to ask since you're only ever acting on
+    your own membership.
+
+    Still subject to the last-owner protection: the organization's
+    sole remaining owner cannot leave (they'd need to promote another
+    owner first, or transfer ownership -- see #16/#30's deferred
+    ownership-transfer flow).
+    """
+    try:
+        member = await remove_member(
+            session, organization_id=organization_id, user_id=user.id
+        )
+    except LastOwnerError:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot leave: you are the organization's last owner",
+        )
+    if member is None:
+        # Unreachable in practice: require_org_member already confirmed
+        # the caller is a member of this organization_id.
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 @router.post("/invitations", response_model=InvitationAckResponse, status_code=202)

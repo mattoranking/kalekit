@@ -1,14 +1,34 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.roles import role_has_permission
 from kalekit.models.organization import MemberRole, Organization, OrganizationMember
 from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.models.user import User
 from kalekit.utils.db.tenancy import tenant_filter
+
+
+class LastOwnerError(Exception):
+    """Raised when a role change or removal would leave the organization
+    with zero owners."""
+
+
+class NotPermittedError(Exception):
+    """Raised when the caller can't act on the target's *current* role.
+
+    Deliberately raised from inside `change_member_role`/`remove_member`,
+    after the organization row is locked and the target's role has been
+    re-read, rather than by an earlier unlocked check in the endpoint --
+    an unlocked pre-check reads a role that can go stale between the
+    check and the mutation (e.g. the target gets promoted to `owner` by
+    a concurrent request in between), which would let a caller who was
+    only ever authorized against the *old* role act on the new one. See
+    the docstrings on `change_member_role`/`remove_member`.
+    """
 
 
 async def create_organization(session: AsyncSession, *, name: str) -> Organization:
@@ -70,6 +90,169 @@ async def add_member(
             raise
         return member, False
     return member, True
+
+
+async def _lock_organization(
+    session: AsyncSession, *, organization_id: uuid.UUID
+) -> Organization | None:
+    """Locks the organization row for the duration of the transaction.
+
+    Serializes concurrent role-change/removal calls against the same
+    org on this lock, so two requests racing to demote/remove the
+    second-to-last owner can't both read "more than one owner left"
+    before either commits -- the same race-safety pattern the ABAC
+    template's `remove_member` uses for last-*member* protection,
+    adapted here to count owners specifically.
+    """
+    result = await session.execute(
+        select(Organization).where(Organization.id == organization_id).with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
+async def _count_owners(
+    session: AsyncSession, *, organization_id: uuid.UUID
+) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(OrganizationMember)
+        .where(
+            tenant_filter(OrganizationMember, organization_id=organization_id),
+            OrganizationMember.role == MemberRole.owner,
+        )
+    )
+    return result.scalar_one()
+
+
+async def change_member_role(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: MemberRole,
+    caller_role: MemberRole,
+) -> OrganizationMember | None:
+    """Changes `user_id`'s role within `organization_id`.
+
+    Locks the organization row first (see `_lock_organization`), then
+    re-reads the target's *current* role under that lock, before doing
+    anything else -- including authorization. `caller_role` is checked
+    against that fresh read (not whatever the endpoint saw in an
+    earlier, unlocked fetch): the caller must hold
+    `members:grant:<target's current role>` to act on them at all, and
+    `members:grant:<role>` to grant the new role. Raises
+    `NotPermittedError` if either check fails.
+
+    Required (unlike `remove_member`'s optional `caller_role`) -- a
+    role change always has both an actor and a role being granted, so
+    there's no legitimate self-acting case (like `remove_member`'s use
+    from `/leave`) where skipping this check would make sense. Making
+    it required here means a future call site that forgets to pass it
+    fails loudly (`TypeError`) instead of silently skipping
+    authorization.
+
+    This ordering matters -- checking authorization before acquiring
+    the lock (or against a pre-lock read) would let a caller who was
+    only ever authorized against a *stale* role slip through if the
+    target's role changes underneath them between the check and the
+    mutation (e.g. a concurrent promotion to `owner` right after an
+    admin's unlocked pre-check read `member`). Locking first, then
+    re-reading, then authorizing, then mutating keeps the whole
+    decision inside one consistently-ordered critical section.
+
+    Raises `LastOwnerError` if `user_id` is currently the sole owner
+    and `role` is anything other than `owner` -- in practice this is
+    only reachable for the last owner demoting themselves, since an
+    admin can never pass the `NotPermittedError` check above against
+    an owner target (admins hold no `members:grant:owner`) to reach
+    this check at all.
+
+    Returns the updated row, or `None` if `user_id` isn't a member of
+    this organization.
+    """
+    organization = await _lock_organization(
+        session, organization_id=organization_id
+    )
+    if organization is None:
+        return None
+
+    member = await get_member(
+        session, organization_id=organization_id, user_id=user_id
+    )
+    if member is None:
+        return None
+
+    if not role_has_permission(
+        caller_role, f"members:grant:{member.role.value}"
+    ) or not role_has_permission(caller_role, f"members:grant:{role.value}"):
+        raise NotPermittedError()
+
+    if member.role == MemberRole.owner and role != MemberRole.owner:
+        owner_count = await _count_owners(session, organization_id=organization_id)
+        if owner_count <= 1:
+            raise LastOwnerError()
+
+    member.role = role
+    await session.flush()
+    return member
+
+
+async def remove_member(
+    session: AsyncSession,
+    *,
+    organization_id: uuid.UUID,
+    user_id: uuid.UUID,
+    caller_role: MemberRole | None = None,
+) -> OrganizationMember | None:
+    """Removes `user_id` from `organization_id`.
+
+    Locks the organization row first (see `_lock_organization`), then
+    re-reads the target's *current* role under that lock, same as
+    `change_member_role` -- see that function's docstring for why
+    authorization has to happen against this fresh read rather than an
+    earlier unlocked one. `caller_role`, if given, must hold
+    `members:grant:<target's current role>`; pass `None` when the
+    caller is acting on their own membership (leaving), where there's
+    no "can I act on this role" question to ask. Raises
+    `NotPermittedError` if the check fails.
+
+    Raises `LastOwnerError` if `user_id` is currently the organization's
+    sole owner -- in practice this is only reachable for the last owner
+    removing/leaving themselves (or another owner removing them), since
+    an admin can never pass the `NotPermittedError` check above against
+    an owner target (admins hold no `members:grant:owner`) to reach
+    this check at all. (Removing the last *member* overall, when that
+    member isn't the/an owner, is out of scope for issue #30 -- only
+    last-owner protection was asked for.)
+
+    Returns the removed row, or `None` if `user_id` wasn't a member of
+    this organization.
+    """
+    organization = await _lock_organization(
+        session, organization_id=organization_id
+    )
+    if organization is None:
+        return None
+
+    member = await get_member(
+        session, organization_id=organization_id, user_id=user_id
+    )
+    if member is None:
+        return None
+
+    if caller_role is not None and not role_has_permission(
+        caller_role, f"members:grant:{member.role.value}"
+    ):
+        raise NotPermittedError()
+
+    if member.role == MemberRole.owner:
+        owner_count = await _count_owners(session, organization_id=organization_id)
+        if owner_count <= 1:
+            raise LastOwnerError()
+
+    await session.delete(member)
+    await session.flush()
+    return member
 
 
 async def list_members(
