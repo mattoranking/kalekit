@@ -3,9 +3,12 @@ get_current_user runs on every authenticated request into a single
 Redis round-trip instead of three sequential ones -- see #94.
 
 These tests spy on the actual redis client's call count (never on
-wall-clock timing, per the issue's own acceptance criteria) and cover
-every combination of which of the three ids is present/blocked, plus
-confirming get_current_user itself only issues one round-trip.
+wall-clock timing, per the issue's own acceptance criteria). With all
+three ids present, every one of the 8 subsets of {jti, user, family}
+that could independently be blocked is covered; a couple of missing-id
+edge cases (all absent, only jti present) are covered separately.
+get_current_user itself is also checked end-to-end to confirm it only
+issues one round-trip.
 """
 
 import pytest
