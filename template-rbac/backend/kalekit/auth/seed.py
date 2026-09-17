@@ -104,6 +104,18 @@ async def _get_or_create_role(
     result = await session.execute(select(Role).where(Role.name == name))
     role = result.scalar_one_or_none()
     if role is not None:
+        # Reconcile the description with what `roles.yaml` currently
+        # says, the same way `_ensure_role_permissions` reconciles
+        # permissions -- editing the file and redeploying should be
+        # enough to change a role's description, not just its
+        # permissions. This is a plain scalar update, not an insert, so
+        # unlike the name/permission races below it needs no
+        # begin_nested()/IntegrityError handling: two concurrent callers
+        # writing the same target description can't conflict with each
+        # other.
+        if role.description != description:
+            role.description = description
+            await session.flush()
         return role
 
     # `ensure_default_roles` runs on every /auth/register and OAuth

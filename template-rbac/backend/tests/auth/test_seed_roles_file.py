@@ -247,3 +247,65 @@ async def test_ensure_default_roles_reconciles_new_permissions_on_rerun(
         )
     ).scalars().all()
     assert len(second_run_permissions) == 2
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_ensure_default_roles_reconciles_description_on_rerun(
+    tmp_path: Path, monkeypatch, session: AsyncSession
+) -> None:
+    """A role's `description` edited in `roles.yaml` after first seed
+    must be picked up on the next `ensure_default_roles` run -- it must
+    not stick with whatever description the role had the first time it
+    was created, the same reconciliation promise already honored for
+    permissions."""
+    import kalekit.auth.seed as seed_module
+
+    seed_file = tmp_path / "roles.yaml"
+    seed_file.write_text(
+        textwrap.dedent(
+            """\
+            roles:
+              visitor:
+                description: "Default role for new sign-ups"
+                permissions: []
+              admin:
+                description: "Full access"
+                permissions: ["*"]
+              editor:
+                description: "Can write posts"
+                permissions: ["posts:write"]
+            """
+        )
+    )
+    monkeypatch.setattr(seed_module, "ROLE_SEED_FILE", seed_file)
+
+    await ensure_default_roles(session)
+
+    editor = (
+        await session.execute(select(Role).where(Role.name == "editor"))
+    ).scalar_one()
+    assert editor.description == "Can write posts"
+
+    # Simulate editing the file and redeploying: editor's description
+    # changes.
+    seed_file.write_text(
+        textwrap.dedent(
+            """\
+            roles:
+              visitor:
+                description: "Default role for new sign-ups"
+                permissions: []
+              admin:
+                description: "Full access"
+                permissions: ["*"]
+              editor:
+                description: "Can write and edit posts"
+                permissions: ["posts:write"]
+            """
+        )
+    )
+
+    await ensure_default_roles(session)
+
+    await session.refresh(editor)
+    assert editor.description == "Can write and edit posts"
