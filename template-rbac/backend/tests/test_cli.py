@@ -5,8 +5,14 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 
-from kalekit.auth.repository import create_user, find_user_by_email
+from kalekit.auth.client_type import ClientType
+from kalekit.auth.repository import (
+    create_user,
+    find_user_by_email,
+    store_refresh_token,
+)
 from kalekit.cli import build_parser, create_admin, generate_secret
+from kalekit.cli import prune_refresh_tokens_cli as _prune_refresh_tokens_cli
 from kalekit.config import MIN_JWT_SECRET_KEY_BYTES
 from kalekit.postgres import create_async_engine
 from kalekit.utils.db.database import create_async_sessionmaker
@@ -195,6 +201,59 @@ def test_generate_secret_writes_new_env_file(tmp_path: Path) -> None:
     assert len(lines) == 1
     secret = lines[0].split("=", 1)[1]
     assert len(secret.encode("utf-8")) >= MIN_JWT_SECRET_KEY_BYTES
+
+
+def test_prune_refresh_tokens_parser_defaults_to_thirty_days() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["prune-refresh-tokens"])
+
+    assert args.command == "prune-refresh-tokens"
+    assert args.older_than_days == 30
+
+
+def test_prune_refresh_tokens_parser_accepts_explicit_window() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["prune-refresh-tokens", "--older-than-days", "7"])
+
+    assert args.older_than_days == 7
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_prune_refresh_tokens_cli_deletes_old_dead_rows_and_reports_count(
+    cli_email: Callable[[str], str],
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    email = cli_email("cli-prune")
+
+    engine = create_async_engine("kalekit")
+    try:
+        async with create_async_sessionmaker(engine)() as session:
+            user = await create_user(
+                session, email, "password123", email_verified=True
+            )
+            now = datetime.now(timezone.utc)
+            token = await store_refresh_token(
+                session,
+                user.id,
+                token_hash=f"cli-prune-{uuid.uuid4().hex}",
+                expires_at=now + timedelta(days=30),
+                client=ClientType.web,
+            )
+            token.revoked = True
+            token.updated_at = now - timedelta(days=40)
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+    await _prune_refresh_tokens_cli(30)
+
+    printed = capsys.readouterr().out
+    assert "Deleted" in printed
+    assert "1" in printed
 
 
 def test_generate_secret_replaces_existing_line_in_place(tmp_path: Path) -> None:
