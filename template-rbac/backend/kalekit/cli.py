@@ -98,7 +98,11 @@ def generate_secret(write_to: str | None) -> None:
     path = Path(write_to)
     line = f"KALEKIT_JWT_SECRET_KEY={secret}\n"
 
-    lines = path.read_text().splitlines(keepends=True) if path.exists() else []
+    lines = (
+        path.read_text(encoding="utf-8").splitlines(keepends=True)
+        if path.exists()
+        else []
+    )
     for i, existing in enumerate(lines):
         if existing.startswith("KALEKIT_JWT_SECRET_KEY="):
             lines[i] = line
@@ -108,7 +112,7 @@ def generate_secret(write_to: str | None) -> None:
             lines[-1] += "\n"
         lines.append(line)
 
-    path.write_text("".join(lines))
+    path.write_text("".join(lines), encoding="utf-8")
     print(f"Wrote a new KALEKIT_JWT_SECRET_KEY to {path}.")
 
 
