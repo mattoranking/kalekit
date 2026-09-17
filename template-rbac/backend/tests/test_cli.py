@@ -252,8 +252,10 @@ async def test_prune_refresh_tokens_cli_deletes_old_dead_rows_and_reports_count(
     await _prune_refresh_tokens_cli(30)
 
     printed = capsys.readouterr().out
-    assert "Deleted" in printed
-    assert "1" in printed
+    # Full-message match, not a loose substring: "1" in printed would
+    # also pass if this over-deleted (e.g. "Deleted 11 ...") -- assert
+    # the exact expected count so the test fails on over-deletion too.
+    assert printed.strip() == "Deleted 1 dead refresh token row(s)."
 
 
 @pytest.mark.asyncio(loop_scope="session")

@@ -39,7 +39,7 @@ async def test_list_user_sessions_uses_the_latest_usable_rows_last_used_at(
     user_id = await _make_user(session, "retention-latest@example.com")
     family_id = uuid.uuid4()
 
-    await store_refresh_token(
+    first = await store_refresh_token(
         session,
         user_id,
         token_hash="hash-older",
@@ -49,9 +49,7 @@ async def test_list_user_sessions_uses_the_latest_usable_rows_last_used_at(
         family_created_at=NOW - timedelta(days=5),
         device_info="OlderDevice",
     )
-    # A second, still-usable row in the same family with a later
-    # last_used_at (simulating a rotation) should win.
-    await store_refresh_token(
+    second = await store_refresh_token(
         session,
         user_id,
         token_hash="hash-newer",
@@ -61,13 +59,27 @@ async def test_list_user_sessions_uses_the_latest_usable_rows_last_used_at(
         family_created_at=NOW - timedelta(days=5),
         device_info="NewerDevice",
     )
+    # Explicitly invert last_used_at from insertion order: the row
+    # created *first* ("OlderDevice") is the one actually most
+    # recently used. Both rows would otherwise pick up their
+    # last_used_at column default at insert time, which happens to
+    # already be in creation order -- that would let a buggy
+    # implementation that merely picks the most-recently-*created* row
+    # pass this test too. Inverting the two makes the assertion below
+    # only pass if the query genuinely orders by last_used_at.
+    first.last_used_at = NOW - timedelta(minutes=1)
+    second.last_used_at = NOW - timedelta(minutes=10)
+    await session.flush()
 
     summaries = await list_user_sessions(session, user_id)
 
     assert len(summaries) == 1
     summary = summaries[0]
     assert summary.family_id == family_id
-    assert summary.device_info == "NewerDevice"
+    # "OlderDevice" wins: it has the later last_used_at even though it
+    # was created first -- proves the query orders by last_used_at, not
+    # creation order.
+    assert summary.device_info == "OlderDevice"
     # created_at reflects the family's absolute start, not either row's
     # own created_at.
     assert summary.created_at == NOW - timedelta(days=5)

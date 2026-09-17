@@ -313,7 +313,11 @@ async def prune_refresh_tokens(session: AsyncSession, *, older_than_days: int) -
             retention_clock <= cutoff,
         )
     )
-    await session.flush()
+    # No flush here: `session.execute(delete(...))` is a Core statement
+    # that issues the DELETE immediately -- it needs no flush to take
+    # effect. Autoflush is off by default in this project, so an
+    # explicit flush here would also unexpectedly flush any unrelated
+    # pending ORM changes the caller hasn't asked to persist yet.
     return result.rowcount or 0
 
 
