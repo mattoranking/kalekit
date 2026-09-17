@@ -53,7 +53,7 @@ async def test_list_sessions_records_device_and_marks_current(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_list_sessions_shows_one_entry_per_device(
+async def test_list_sessions_shows_one_entry_per_session(
     client: AsyncClient,
 ) -> None:
     email = "sessions-two@example.com"
