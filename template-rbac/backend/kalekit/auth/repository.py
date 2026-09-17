@@ -1,8 +1,8 @@
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.client_type import ClientType
@@ -254,6 +254,73 @@ async def revoke_user_refresh_tokens_except_family(
     return list(revoked_families)
 
 
+async def prune_refresh_tokens(session: AsyncSession, *, older_than_days: int) -> int:
+    """Delete dead refresh-token rows (revoked, or expired) that have
+    been dead for at least the given retention window.
+
+    This is the retention half of #73: the query rewrite in
+    `list_user_sessions` stops dead rows from being loaded into
+    Python on every session-list request, but the `refresh_tokens`
+    table itself still grows forever (a new row per rotation, never
+    deleted) unless something like this is run periodically. Meant to
+    be invoked out of band, e.g. `kalekit.cli prune-refresh-tokens`
+    on a daily cron -- see the CLI docstring and README.
+
+    `coalesce(updated_at, expires_at)` is the retention clock, and in
+    both cases it resolves to the row's *death time* -- when it
+    stopped being usable -- never its issuance time:
+      - A row that was explicitly revoked or replaced gets `updated_at`
+        bumped by `onupdate=utc_now` (see `mark_refresh_token_replaced`
+        / `revoke_user_refresh_tokens` / `revoke_refresh_token_family`),
+        so it ages out from *when it was revoked*.
+      - A row that only died by natural expiry and was never otherwise
+        touched has a null `updated_at`, so it falls back to
+        `expires_at` and ages out from *when it expired*.
+    Using `created_at` (issuance time) for that fallback instead would
+    be wrong: a long-lived session's token (e.g. the 90-day web/mobile
+    idle timeout, see #6) can easily have a `created_at` that's
+    already further in the past than the retention window the instant
+    it naturally expires, which would delete it immediately instead of
+    `older_than_days` after it actually died. Only rows that are
+    *currently* dead are ever deleted -- still-usable tokens are
+    untouched regardless of age, since a long-lived session (rotated
+    regularly) must never be pruned out from under its user.
+
+    Raises `ValueError` if `older_than_days` is negative -- a negative
+    window would make `cutoff` a *future* timestamp, so
+    `retention_clock <= cutoff` would hold for nearly every already-dead
+    row regardless of how recently it died (e.g. a typo'd
+    `--older-than-days -5` would prune far more aggressively than
+    intended, silently). `older_than_days=0` is allowed -- "prune
+    anything that's dead right now" is a well-defined, if aggressive,
+    policy.
+    """
+    if older_than_days < 0:
+        raise ValueError(
+            f"older_than_days must be >= 0, got {older_than_days!r}"
+        )
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=older_than_days)
+    retention_clock = func.coalesce(RefreshToken.updated_at, RefreshToken.expires_at)
+    result = await session.execute(
+        delete(RefreshToken).where(
+            or_(
+                RefreshToken.revoked == True,  # noqa: E712
+                RefreshToken.expires_at <= now,
+            ),
+            # "at least older_than_days" -- a row that died exactly on
+            # the cutoff boundary is eligible now, not on the next run.
+            retention_clock <= cutoff,
+        )
+    )
+    # No flush here: `session.execute(delete(...))` is a Core statement
+    # that issues the DELETE immediately -- it needs no flush to take
+    # effect. Autoflush is off by default in this project, so an
+    # explicit flush here would also unexpectedly flush any unrelated
+    # pending ORM changes the caller hasn't asked to persist yet.
+    return result.rowcount or 0
+
+
 async def get_family_owner(
     session: AsyncSession, family_id: uuid.UUID
 ) -> uuid.UUID | None:
@@ -284,35 +351,61 @@ async def list_user_sessions(
     no token that's both unrevoked and unexpired are dead sessions
     (naturally expired or fully revoked) and are excluded entirely --
     a user shouldn't see a "session" in the list they can't actually
-    do anything with. `created_at` is the family's oldest token (i.e.
-    the session's start, even if that first token has since rotated
-    out or expired); `last_used_at`/`device_info`/`ip_address` come
-    from the most recent token that's still usable, not merely the
-    most recently created one.
-    """
-    result = await session.execute(
-        select(RefreshToken)
-        .where(RefreshToken.user_id == user_id)
-        .order_by(RefreshToken.family_id, RefreshToken.created_at)
-    )
-    families: dict[uuid.UUID, list[RefreshToken]] = {}
-    for token in result.scalars():
-        families.setdefault(token.family_id, []).append(token)
+    do anything with. `created_at` is the family's absolute start
+    (`family_created_at`, carried unchanged across every row in the
+    family -- see RefreshToken.family_created_at -- so it doesn't
+    matter whether the original row has since rotated out or expired);
+    `last_used_at`/`device_info`/`ip_address` come from the most
+    recent token that's still usable, not merely the most recently
+    created one.
 
+    This does the per-family grouping and usable/latest filtering in
+    SQL via `DISTINCT ON`, so only one row per active family is ever
+    fetched -- a user's full (potentially large, ever-growing via
+    rotation) token history never has to be loaded into Python. See
+    #73.
+
+    `DISTINCT ON (family_id)` picks whichever row sorts first within
+    each family per the `ORDER BY`, so the tiebreak after
+    `last_used_at DESC` matters: two usable rows in the same family
+    can share the exact same `last_used_at` (concurrent/rapid
+    rotation, or just timestamp precision), and without a
+    deterministic secondary key Postgres is free to pick either one
+    arbitrarily -- which would make the reported device/IP for a
+    session flicker between requests with no underlying change.
+    `created_at DESC, id DESC` breaks that tie consistently in favor
+    of the most recently created row (falling back to `id` only for
+    the vanishingly unlikely case two rows share both timestamps).
+    """
     now = datetime.now(timezone.utc)
-    summaries: list[SessionSummary] = []
-    for family_id, tokens in families.items():
-        usable = [t for t in tokens if not t.revoked and t.expires_at > now]
-        if not usable:
-            continue
-        latest = max(usable, key=lambda t: t.last_used_at)
-        summaries.append(
-            SessionSummary(
-                family_id=family_id,
-                created_at=tokens[0].created_at,
-                last_used_at=latest.last_used_at,
-                device_info=latest.device_info,
-                ip_address=latest.ip_address,
-            )
+    result = await session.execute(
+        select(
+            RefreshToken.family_id,
+            RefreshToken.family_created_at,
+            RefreshToken.last_used_at,
+            RefreshToken.device_info,
+            RefreshToken.ip_address,
         )
-    return summaries
+        .distinct(RefreshToken.family_id)
+        .where(
+            RefreshToken.user_id == user_id,
+            RefreshToken.revoked == False,  # noqa: E712
+            RefreshToken.expires_at > now,
+        )
+        .order_by(
+            RefreshToken.family_id,
+            RefreshToken.last_used_at.desc(),
+            RefreshToken.created_at.desc(),
+            RefreshToken.id.desc(),
+        )
+    )
+    return [
+        SessionSummary(
+            family_id=row.family_id,
+            created_at=row.family_created_at,
+            last_used_at=row.last_used_at,
+            device_info=row.device_info,
+            ip_address=row.ip_address,
+        )
+        for row in result
+    ]

@@ -35,3 +35,31 @@ uv run python -m kalekit.cli create-admin --email you@example.com --password 'a 
 If a user with that email already exists, `--password` is ignored and
 they're promoted in place; otherwise it's required and a new, pre-verified
 admin user is created directly.
+
+## Refresh token retention
+
+Every refresh, and every login/OAuth exchange, inserts a new `refresh_tokens`
+row (see `kalekit/models/refresh_token.py` and the rotation flow in
+`kalekit/auth/endpoints.py`); rows are never deleted automatically. Left
+alone, a long-lived, regularly-used account's row count grows unbounded.
+
+`GET /v1/auth/sessions` (`kalekit.auth.repository.list_user_sessions`) only
+ever reads currently-usable rows -- it does its per-family grouping and
+usable/latest filtering in SQL, so the growing table doesn't slow that
+endpoint down. But the table itself still grows, which is undesirable for
+storage and backup size regardless.
+
+This template has no built-in job scheduler (no Celery/arq/cron process),
+so rather than invent one, retention is a manual operator command in the
+same spirit as `create-admin`:
+
+```bash
+uv run python -m kalekit.cli prune-refresh-tokens --older-than-days 30
+```
+
+This deletes refresh token rows that are both *dead* (revoked, or expired)
+and have been dead for at least the given window -- still-usable tokens are
+never touched regardless of age. Wire this into whatever cron/scheduled-job
+mechanism your deployment already has (e.g. a daily job); 30 days is a
+reasonable default but pick a window based on how far back you want to be
+able to investigate a compromised-session incident.

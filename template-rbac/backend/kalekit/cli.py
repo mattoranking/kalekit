@@ -18,6 +18,15 @@ Also provides `generate-secret`, for producing a strong KALEKIT_JWT_SECRET_KEY
 
     uv run python -m kalekit.cli generate-secret
     uv run python -m kalekit.cli generate-secret --write .env
+
+And `prune-refresh-tokens`, for deleting dead (revoked/expired) refresh
+token rows once they're old enough that nothing needs them any more --
+see kalekit.auth.repository.prune_refresh_tokens for exactly which rows
+qualify and why. There is no built-in scheduler in this template, so
+this is meant to be wired into whatever cron/scheduled-job mechanism
+the deployment already has, e.g. daily:
+
+    uv run python -m kalekit.cli prune-refresh-tokens --older-than-days 30
 """
 
 import argparse
@@ -31,7 +40,11 @@ import structlog
 # Import the model package so every mapped class is registered before any
 # query runs -- mirrors what kalekit.main does implicitly at app startup.
 import kalekit.models  # noqa: F401
-from kalekit.auth.repository import create_user, find_user_by_email
+from kalekit.auth.repository import (
+    create_user,
+    find_user_by_email,
+    prune_refresh_tokens,
+)
 from kalekit.auth.seed import ADMIN_ROLE, assign_role, ensure_default_roles
 from kalekit.postgres import create_async_engine
 from kalekit.utils.db.database import create_async_sessionmaker
@@ -75,6 +88,27 @@ async def create_admin(email: str, password: str | None) -> None:
             await assign_role(session, user, admin_role)
             await session.commit()
             print(f"Promoted {email} to admin.")
+    finally:
+        await engine.dispose()
+
+
+async def prune_refresh_tokens_cli(older_than_days: int) -> None:
+    engine = create_async_engine("kalekit")
+    sessionmaker = create_async_sessionmaker(engine)
+
+    try:
+        async with sessionmaker() as session:
+            try:
+                deleted = await prune_refresh_tokens(
+                    session, older_than_days=older_than_days
+                )
+            except ValueError as exc:
+                # e.g. a negative --older-than-days -- surface this as a
+                # clean operator-facing error instead of a raw traceback.
+                print(f"Error: {exc}", file=sys.stderr)
+                raise SystemExit(1) from exc
+            await session.commit()
+            print(f"Deleted {deleted} dead refresh token row(s).")
     finally:
         await engine.dispose()
 
@@ -158,6 +192,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    prune_refresh_tokens_parser = subparsers.add_parser(
+        "prune-refresh-tokens",
+        help="Delete dead (revoked/expired) refresh token rows older than a "
+        "retention window.",
+    )
+    prune_refresh_tokens_parser.add_argument(
+        "--older-than-days",
+        type=int,
+        default=30,
+        help=(
+            "Retention window in days. A dead row (revoked, or expired) is "
+            "deleted once it's been dead for at least this long. Defaults "
+            "to 30."
+        ),
+    )
+
     return parser
 
 
@@ -169,6 +219,8 @@ def main() -> None:
         asyncio.run(create_admin(args.email, args.password))
     elif args.command == "generate-secret":
         generate_secret(args.write_to)
+    elif args.command == "prune-refresh-tokens":
+        asyncio.run(prune_refresh_tokens_cli(args.older_than_days))
 
 
 if __name__ == "__main__":
