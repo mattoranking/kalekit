@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Password reset (#17). Deliberately much shorter-lived than an
+    # email-verification token -- this one authorizes an account
+    # takeover if intercepted, not just an email-ownership proof. Kept
+    # within the 15-60 minute range #17 calls for.
+    PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
+
     # Extra origins (beyond FRONTEND_URL, which is always allowed) the
     # OAuth callback may redirect back to after login. Comma-separated
     # full URLs or bare origins, e.g.
@@ -180,6 +186,27 @@ class Settings(BaseSettings):
     # trigger in a window.
     RESEND_VERIFICATION_RATE_LIMIT_PER_USER: int = 5
     RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+
+    # Forgot-password (#17): unauthenticated and the classic account-
+    # enumeration oracle, so -- like login -- it's throttled both by IP
+    # (credential-stuffing-style abuse across many addresses) and by the
+    # submitted email itself (protects one mailbox from being flooded
+    # with reset emails). Unlike login's account limit, this one counts
+    # *every* request against the email, not just "failures" -- there is
+    # no failure/success distinction visible to the caller here (the
+    # response is identical either way), so counting unconditionally is
+    # what keeps the limiter itself from leaking which emails are
+    # registered.
+    PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP: int = 10
+    PASSWORD_RESET_REQUEST_RATE_LIMIT_IP_WINDOW_SECONDS: int = 3600
+    PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT: int = 3
+    PASSWORD_RESET_REQUEST_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS: int = 3600
+
+    # Reset (token redemption): per IP, guarding against brute-forcing
+    # the token itself -- there's no "account" to key on since the token
+    # is presented without any other identifying credential.
+    PASSWORD_RESET_RATE_LIMIT_PER_IP: int = 20
+    PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS: int = 3600
 
     # Only trust `X-Forwarded-For` (set by Traefik -- see compose.yml)
     # for IP-keyed rate limiting when the API actually sits behind a

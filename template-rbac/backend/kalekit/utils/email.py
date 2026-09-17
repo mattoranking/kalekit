@@ -1,6 +1,6 @@
 """Pluggable outbound email.
 
-Only email verification uses this today. `ConsoleEmailSender` is the
+Email verification and password reset use this today. `ConsoleEmailSender` is the
 default for local/dev/test -- it just logs the message instead of
 sending it, so the kit works out of the box without SMTP credentials.
 Swap `get_email_sender` for a real provider (SES, Postmark, Resend,
@@ -51,9 +51,28 @@ async def send_verification_email(*, to: str, token: str) -> None:
     )
 
 
+async def send_password_reset_email(*, to: str, token: str) -> None:
+    reset_url = f"{settings.FRONTEND_URL}/reset-password?token={token}"
+    sender = get_email_sender()
+    await sender.send(
+        to=to,
+        subject="Reset your password",
+        body=(
+            "We received a request to reset the password for this "
+            f"account. Visit the link below to choose a new one:\n\n"
+            f"{reset_url}\n\n"
+            "If you didn't request this, you can safely ignore this "
+            "email -- your password won't change.\n\n"
+            "This link expires in "
+            f"{settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} minutes."
+        ),
+    )
+
+
 __all__ = [
     "ConsoleEmailSender",
     "EmailSender",
     "get_email_sender",
+    "send_password_reset_email",
     "send_verification_email",
 ]

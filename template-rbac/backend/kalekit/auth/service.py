@@ -85,6 +85,21 @@ def verification_token_expiry() -> datetime:
     )
 
 
+def password_reset_token_expiry() -> datetime:
+    """Password-reset tokens get their own (much shorter) expiry than
+    email-verification tokens -- they authorize an account takeover if
+    intercepted, not just an email-ownership proof, so the window a
+    leaked/intercepted link stays valid should be minutes, not hours.
+    The raw token itself is generated and hashed exactly like an
+    email-verification token (`generate_verification_token` /
+    `hash_verification_token` -- both already generic over what kind of
+    token they're producing/hashing), so only the expiry duration
+    differs."""
+    return datetime.now(timezone.utc) + timedelta(
+        minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
+    )
+
+
 def create_access_token(
     user_id: str,
     scopes: list[str],
