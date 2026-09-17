@@ -168,8 +168,12 @@ async def test_account_lockout_recovers_when_its_redis_key_loses_its_ttl(
     )
     assert blocked.status_code == 429
     # The peek path must have re-armed the TTL instead of leaving it
-    # at -1 forever.
-    assert await r.ttl(account_key) > 0
+    # at -1 forever. Checked against -1 rather than "> 0": with a
+    # 1-second window, Redis's TTL can legitimately have already
+    # rounded down to 0 by the time this assertion runs, which isn't a
+    # sign of a bug -- only "still has no expiry at all" is (round-4
+    # Copilot finding on PR #88).
+    assert await r.ttl(account_key) != -1
 
 
 @pytest.mark.asyncio(loop_scope="session")
