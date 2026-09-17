@@ -78,7 +78,7 @@ def _make_token(
     key: str = settings.JWT_SECRET_KEY,
     kid: Any = settings.JWT_KID,
     algorithm: str = settings.JWT_ALGORITHM,
-    aud: str | None = ClientType.web.value,
+    aud: str | list[str] | None = ClientType.web.value,
     exp_delta: timedelta = timedelta(minutes=15),
     token_type: str = "access",
 ) -> str:
@@ -254,6 +254,26 @@ def test_decode_accepts_every_valid_client_as_audience(
     payload = _decode_access_token(_credentials(token))
 
     assert payload["aud"] == client_type.value
+
+
+def test_decode_rejects_a_list_valued_audience_even_with_a_valid_entry() -> None:
+    """PyJWT (per the JWT spec) allows `aud` to be a list of strings,
+    and accepts a token as long as any one entry matches an audience in
+    `audience=_VALID_AUDIENCES` -- so a token minted with e.g.
+    `aud: ["web", "mobile"]` would otherwise decode successfully and
+    hand back a *list* for `payload["aud"]`. This app never mints a
+    multi-audience token (create_access_token always sets `aud` to a
+    single client string), and downstream code (get_current_client's
+    `ClientType(payload["aud"])`) can't handle a list -- so this must
+    be rejected here, at decode time, rather than raising an unhandled
+    error further downstream. See the round-5 Copilot review on
+    PR #75."""
+    token = _make_token(aud=["web", "mobile"])
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
 
 
 @pytest.mark.asyncio(loop_scope="session")

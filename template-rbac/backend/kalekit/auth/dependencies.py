@@ -73,6 +73,22 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
 
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type")
+
+    # The JWT spec (and PyJWT) allows `aud` to be either a single string
+    # or a list of strings; jwt.decode's `audience=_VALID_AUDIENCES`
+    # check above accepts a token whose `aud` is a *list* as long as
+    # one entry matches, and hands it back as-is -- i.e. `payload["aud"]`
+    # could come back as e.g. `["web", "mobile"]` rather than "web".
+    # This app never mints multi-audience tokens (create_access_token
+    # always sets `aud` to a single client string), so reject that
+    # shape here, at the one place every caller's token gets decoded,
+    # rather than needing get_current_client and everything else that
+    # reads `aud` to separately guard against it -- otherwise
+    # `ClientType(payload["aud"])` downstream raises on the unhashable
+    # list and surfaces as an unhandled 500 instead of failing closed.
+    if not isinstance(payload.get("aud"), str):
+        raise HTTPException(status_code=401, detail="Invalid token audience")
+
     return payload
 
 
