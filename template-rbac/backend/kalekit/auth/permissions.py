@@ -117,12 +117,6 @@ async def block_token(jti: str, ttl_seconds: int | None = None) -> None:
     await r.set(f"{_BLOCKLIST_PREFIX}{jti}", "1", ex=ttl)
 
 
-async def is_token_blocked(jti: str) -> bool:
-    """Check if a token JTI has been revoked."""
-    r = await get_redis()
-    return await r.exists(f"{_BLOCKLIST_PREFIX}{jti}") > 0
-
-
 async def block_all_user_tokens(user_id: str) -> None:
     """Flag a user so get_current_user rejects any access token.
 
@@ -134,12 +128,6 @@ async def block_all_user_tokens(user_id: str) -> None:
     r = await get_redis()
     ttl = settings.access_token_max_expire_minutes() * 60
     await r.set(f"blocked_user:{user_id}", "1", ex=ttl)
-
-
-async def is_user_blocked(user_id: str) -> bool:
-    """Check if all of this user's tokens were flagged as revoked."""
-    r = await get_redis()
-    return await r.exists(f"blocked_user:{user_id}") > 0
 
 
 async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) -> None:
@@ -162,25 +150,18 @@ async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) ->
     await r.set(f"blocked_family:{family_id}", "1", ex=ttl)
 
 
-async def is_family_blocked(family_id: str) -> bool:
-    """Check if a specific session (token family) has been revoked."""
-    r = await get_redis()
-    return await r.exists(f"blocked_family:{family_id}") > 0
-
-
 async def is_any_blocked(
     jti: str | None, user_id: str | None, family_id: str | None
 ) -> bool:
     """Combined jti/user/family blocklist check in a single Redis
     round-trip, for get_current_user's hot path (see #94).
 
-    Equivalent to `is_token_blocked(jti) or is_user_blocked(user_id) or
-    is_family_blocked(family_id)`, but instead of three sequential
-    `EXISTS` round-trips it issues one `MGET` across whichever of the
-    three keys apply. An id that's None (absent from the token) is
-    simply not checked -- same as the `if jti and ...` guards this
-    replaces at the call site -- rather than treated as blocked or not
-    blocked either way.
+    Checks whether the token's JTI, the user, or the token's family has
+    been blocked, but instead of three sequential `EXISTS` round-trips
+    it issues one `MGET` across whichever of the three keys apply. An
+    id that's None (absent from the token) is simply not checked --
+    same as the `if jti and ...` guards this replaces at the call
+    site -- rather than treated as blocked or not blocked either way.
     """
     keys = []
     if jti:
