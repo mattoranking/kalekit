@@ -1,3 +1,14 @@
+# HSTS is set here, on the edge, and only for the HTTPS routers (each router
+# in compose.yml opts in with `middlewares=hsts@file`). Traefik only emits it
+# on TLS requests. The API and the Next.js apps never send it, so plain-HTTP
+# local development is unaffected. See CLAUDE.md, "Security headers".
+http:
+  middlewares:
+    hsts:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: true
+
 tls:
   certificates:
     - certFile: /certs/kalekit.dev.pem

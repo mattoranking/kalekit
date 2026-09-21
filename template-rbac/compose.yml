@@ -83,6 +83,7 @@ services:
       KALEKIT_POSTGRES_DATABASE: ${KALEKIT_POSTGRES_DB}
       KALEKIT_JWT_SECRET_KEY: ${KALEKIT_JWT_SECRET_KEY}
       KALEKIT_CORS_ORIGINS: ${KALEKIT_CORS_ORIGINS}
+      KALEKIT_ALLOWED_HOSTS: ${KALEKIT_ALLOWED_HOSTS:-api.kalekit.dev,localhost,127.0.0.1}
       KALEKIT_REDIS_URL: redis://redis:6379/0
       GEMINI_API_KEY: ${GEMINI_API_KEY}
     labels:
@@ -90,6 +91,7 @@ services:
       - "traefik.http.routers.api.rule=Host(`api.kalekit.dev`)"
       - "traefik.http.routers.api.entrypoints=websecure"
       - "traefik.http.routers.api.tls=true"
+      - "traefik.http.routers.api.middlewares=hsts@file"
       - "traefik.http.services.api.loadbalancer.server.port=8000"
     expose:
       - "8000"
@@ -117,6 +119,7 @@ services:
       - "traefik.http.routers.web.rule=Host(`app.kalekit.dev`)"
       - "traefik.http.routers.web.entrypoints=websecure"
       - "traefik.http.routers.web.tls=true"
+      - "traefik.http.routers.web.middlewares=hsts@file"
       - "traefik.http.services.web.loadbalancer.server.port=3000"
     expose:
       - "3000"
@@ -138,6 +141,7 @@ services:
       - "traefik.http.routers.site.rule=Host(`kalekit.dev`)"
       - "traefik.http.routers.site.entrypoints=websecure"
       - "traefik.http.routers.site.tls=true"
+      - "traefik.http.routers.site.middlewares=hsts@file"
       - "traefik.http.services.site.loadbalancer.server.port=3001"
     expose:
       - "3001"
@@ -159,6 +163,7 @@ services:
       - "traefik.http.routers.admin.rule=Host(`admin.kalekit.dev`)"
       - "traefik.http.routers.admin.entrypoints=websecure"
       - "traefik.http.routers.admin.tls=true"
+      - "traefik.http.routers.admin.middlewares=hsts@file"
       - "traefik.http.services.admin.loadbalancer.server.port=3002"
     expose:
       - "3002"
