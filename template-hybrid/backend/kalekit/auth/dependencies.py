@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import jwt
@@ -23,16 +23,32 @@ logger = structlog.get_logger()
 bearer_scheme = HTTPBearer()
 
 
+def _decode_access_token(token: str) -> dict[str, Any]:
+    """The one place an access token's signature and claims are checked.
+
+    Raises jwt.PyJWTError for anything invalid; callers map that to 401.
+    `iss` must be present and equal JWT_ISSUER, so a token minted by
+    another service or environment that shares the signing key is
+    rejected.
+    """
+    return jwt.decode(
+        token,
+        settings.JWT_SECRET_KEY,
+        # Pinning the algorithm list (rather than trusting whatever
+        # `alg` the token claims) closes the "alg: none" / algorithm
+        # confusion attacks.
+        algorithms=[settings.JWT_ALGORITHM],
+        issuer=settings.JWT_ISSUER,
+        options={"require": ["iss"]},
+    )
+
+
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> User:
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-        )
+        payload = _decode_access_token(credentials.credentials)
         if payload.get("type") != "access":
             raise HTTPException(status_code=401, detail="Invalid token type")
         user_id = payload.get("sub")
@@ -70,11 +86,7 @@ async def get_current_jti(
     """The current access token's unique id, for revoking it by itself
     (e.g. on logout) rather than every token the user holds."""
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            settings.JWT_SECRET_KEY,
-            algorithms=[settings.JWT_ALGORITHM],
-        )
+        payload = _decode_access_token(credentials.credentials)
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
     return payload.get("jti")

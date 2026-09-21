@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # Auth / JWT
     JWT_SECRET_KEY: str = "change-me-in-production"
     JWT_ALGORITHM: str = "HS256"
+    # Value of the `iss` claim stamped on every access token and required
+    # on decode, so a token minted by a different service or environment
+    # that happens to share a signing key (e.g. a staging copy with a
+    # copied secret) is rejected. Set it per deployment/environment.
+    JWT_ISSUER: str = "kalekit"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     # How long, after a refresh token is rotated, its immediate

@@ -48,3 +48,12 @@ enforces only the maximum: an oversized password gets the same
 existing accounts with shorter passwords can still sign in. The rule
 lives in `kalekit/auth/password_policy.py`; any endpoint that sets a
 password should use its `NewPassword` type.
+
+## Access token issuer
+
+Access tokens carry an `iss` claim set from `KALEKIT_JWT_ISSUER` (default
+`kalekit`), and verification rejects any token whose `iss` is missing or
+different. Set a distinct value per environment so a token minted by
+another service or environment that shares the signing key is not
+accepted here. Changing it invalidates outstanding access tokens; clients
+recover by refreshing (refresh tokens are opaque and unaffected).
