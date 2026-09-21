@@ -1,9 +1,9 @@
 ---
-name: fullstack-monorepo
+name: kalekit
 description: Generate a new, ready-to-run full-stack monorepo (FastAPI backend + Next.js web/site/admin + Expo mobile + shared packages + Docker Compose + GitHub Actions CI/CD). Use when the user wants to start a new project / scaffold a codebase / "spin up" a new app from this stack. Takes a project name and produces a working repo where `make setup` then `docker compose up` just runs.
 ---
 
-# fullstack-monorepo
+# kalekit
 
 Scaffolds a complete monorepo from one of three bundled `template-<style>/` trees
 and leaves it running.
@@ -71,7 +71,7 @@ the generator's own `rbac` default only exists for scripting/back-compat.
 
 3. **Run the generator:**
    ```
-   bash ~/.claude/skills/fullstack-monorepo/scripts/generate.sh --auth <rbac|abac|hybrid> <name> <target-dir>
+   bash ~/.claude/skills/kalekit/scripts/generate.sh --auth <rbac|abac|hybrid> <name> <target-dir>
    ```
    It copies the matching `template-<style>/` tree, renames every token
    (`kalekit`→`<name>`, `KALEKIT`→`<NAME>`, `Kalekit`→`<Name>` — including the Python
