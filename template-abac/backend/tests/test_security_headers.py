@@ -63,13 +63,13 @@ async def test_login_and_refresh_are_no_store(
     client: AsyncClient,
     register: Callable[..., Coroutine[None, None, Response]],
 ) -> None:
-    assert (await register("headers@example.com")).status_code == 201
+    assert (await register("headers@example.com", "password12345")).status_code == 201
 
     login = await client.post(
         "/v1/auth/login",
         json={
             "email": "headers@example.com",
-            "password": "password123",
+            "password": "password12345",
         },
     )
     assert login.status_code == 200
