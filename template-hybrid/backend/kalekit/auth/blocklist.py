@@ -23,8 +23,13 @@ expired anyway.
 
 import json
 
+import structlog
+from redis.exceptions import RedisError
+
 from kalekit.config import settings
 from kalekit.redis import get_redis
+
+logger = structlog.get_logger()
 
 _BLOCKLIST_PREFIX = "blocked_token:"
 _USER_BLOCKLIST_PREFIX = "blocked_user:"
@@ -88,28 +93,48 @@ async def cache_refresh_grace_pair(
         # A zero/negative grace period means the feature is effectively
         # disabled -- nothing to cache.
         return
-    r = await get_redis()
-    await r.set(
-        f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
-        json.dumps(payload),
-        ex=ttl_seconds,
-    )
+    try:
+        r = await get_redis()
+        await r.set(
+            f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
+            json.dumps(payload),
+            ex=ttl_seconds,
+        )
+    except RedisError:
+        # Best-effort only: this cache just smooths over a *second*,
+        # concurrent legitimate refresh of the same about-to-be-rotated
+        # token (see refresh() in kalekit.auth.endpoints). A Redis
+        # outage must not turn an otherwise-successful refresh into a
+        # 500 (the write is inline, before commit, so it would also
+        # roll back a valid rotation); this one rotation simply loses
+        # grace-window leniency.
+        logger.warning("refresh_grace_cache_write_failed", exc_info=True)
 
 
 async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
-    r = await get_redis()
-    cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    try:
+        r = await get_redis()
+        cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    except RedisError:
+        logger.warning("refresh_grace_cache_read_failed", exc_info=True)
+        return None
     if cached is None:
         return None
     try:
-        payload = json.loads(cached)
+        decoded = json.loads(cached)
     except (TypeError, ValueError):
-        # Corrupted/non-JSON entry -- treat exactly like a cache miss
-        # (the caller then fails closed with a 401, per refresh()'s
-        # "cache entry expired/evicted" branch) rather than letting a
-        # malformed Redis value turn a refresh attempt into an
-        # unhandled 500.
+        # Corrupt cached value: treat as a miss. The caller already
+        # fails closed with a 401 on None, which is the right outcome
+        # for an ambiguous (not confirmed-reuse) case.
+        logger.warning("refresh_grace_cache_value_corrupt", exc_info=True)
         return None
-    if not isinstance(payload, dict):
+    if (
+        not isinstance(decoded, dict)
+        or not isinstance(decoded.get("access_token"), str)
+        or not isinstance(decoded.get("refresh_token"), str)
+    ):
+        # Valid JSON but not the TokenResponse shape this cache only
+        # ever holds; treat as a miss too.
+        logger.warning("refresh_grace_cache_value_malformed")
         return None
-    return payload
+    return decoded
