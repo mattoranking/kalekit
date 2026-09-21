@@ -85,6 +85,7 @@ from kalekit.utils.rate_limit import (
     bounded_identifier,
     check_and_increment,
     get_client_ip,
+    rate_limit_fails_open,
 )
 
 router = APIRouter(
@@ -113,16 +114,17 @@ async def register(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     if settings.RATE_LIMIT_ENABLED:
-        r = await get_redis()
-        ip_key = f"register_rate:ip:{get_client_ip(request)}"
-        allowed = await check_and_increment(
-            r,
-            ip_key,
-            limit=settings.REGISTER_RATE_LIMIT_PER_IP,
-            window_seconds=settings.REGISTER_RATE_LIMIT_WINDOW_SECONDS,
-        )
-        if not allowed:
-            raise _rate_limited(await r.ttl(ip_key))
+        with rate_limit_fails_open("register"):
+            r = await get_redis()
+            ip_key = f"register_rate:ip:{get_client_ip(request)}"
+            allowed = await check_and_increment(
+                r,
+                ip_key,
+                limit=settings.REGISTER_RATE_LIMIT_PER_IP,
+                window_seconds=settings.REGISTER_RATE_LIMIT_WINDOW_SECONDS,
+            )
+            if not allowed:
+                raise _rate_limited(await r.ttl(ip_key))
 
     existing = await find_user_by_email(session, body.email)
     if existing:
@@ -197,35 +199,36 @@ async def login(
     # requests targeting the same account.)
     account_key = f"login_rate:account:{bounded_identifier(body.email.lower())}"
     if settings.RATE_LIMIT_ENABLED:
-        r = await get_redis()
-        ip_key = f"login_rate:ip:{get_client_ip(request)}"
-        ip_allowed = await check_and_increment(
-            r,
-            ip_key,
-            limit=settings.LOGIN_RATE_LIMIT_PER_IP,
-            window_seconds=settings.LOGIN_RATE_LIMIT_IP_WINDOW_SECONDS,
-        )
-        if not ip_allowed:
-            raise _rate_limited(await r.ttl(ip_key))
+        with rate_limit_fails_open("login"):
+            r = await get_redis()
+            ip_key = f"login_rate:ip:{get_client_ip(request)}"
+            ip_allowed = await check_and_increment(
+                r,
+                ip_key,
+                limit=settings.LOGIN_RATE_LIMIT_PER_IP,
+                window_seconds=settings.LOGIN_RATE_LIMIT_IP_WINDOW_SECONDS,
+            )
+            if not ip_allowed:
+                raise _rate_limited(await r.ttl(ip_key))
 
-        # Peek (don't increment) the account's failure count -- only an
-        # actual failed attempt below should consume this budget, so a
-        # request that goes on to succeed must not have already spent
-        # a unit of it just by arriving.
-        current_failures = await r.get(account_key)
-        if current_failures:
-            account_ttl = await r.ttl(account_key)
-            if account_ttl == -1:
-                # Same TTL-recovery this key would otherwise only get
-                # from check_and_increment (see utils/rate_limit.py) --
-                # but this peek path never calls that, so without this
-                # a key that lost its expiry (e.g. a crash between a
-                # prior INCR and its EXPIRE) would block this account
-                # forever instead of resetting after the window.
-                account_ttl = settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
-                await r.expire(account_key, account_ttl)
-            if int(current_failures) >= settings.LOGIN_RATE_LIMIT_PER_ACCOUNT:
-                raise _rate_limited(account_ttl)
+            # Peek (don't increment) the account's failure count -- only an
+            # actual failed attempt below should consume this budget, so a
+            # request that goes on to succeed must not have already spent
+            # a unit of it just by arriving.
+            current_failures = await r.get(account_key)
+            if current_failures:
+                account_ttl = await r.ttl(account_key)
+                if account_ttl == -1:
+                    # Same TTL-recovery this key would otherwise only get
+                    # from check_and_increment (see utils/rate_limit.py) --
+                    # but this peek path never calls that, so without this
+                    # a key that lost its expiry (e.g. a crash between a
+                    # prior INCR and its EXPIRE) would block this account
+                    # forever instead of resetting after the window.
+                    account_ttl = settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                    await r.expire(account_key, account_ttl)
+                if int(current_failures) >= settings.LOGIN_RATE_LIMIT_PER_ACCOUNT:
+                    raise _rate_limited(account_ttl)
 
     user = await find_user_by_email(session, body.email)
 
@@ -241,12 +244,13 @@ async def login(
 
     if not user or not password_valid:
         if r is not None:
-            await check_and_increment(
-                r,
-                account_key,
-                limit=settings.LOGIN_RATE_LIMIT_PER_ACCOUNT,
-                window_seconds=settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
-            )
+            with rate_limit_fails_open("login"):
+                await check_and_increment(
+                    r,
+                    account_key,
+                    limit=settings.LOGIN_RATE_LIMIT_PER_ACCOUNT,
+                    window_seconds=settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
+                )
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
@@ -258,7 +262,8 @@ async def login(
         # this account -- the threshold is meant to slow down guessing,
         # not to keep locking out someone who's now proven they have
         # the right password.
-        await r.delete(account_key)
+        with rate_limit_fails_open("login"):
+            await r.delete(account_key)
 
     # Transparently move a legacy (pre-pwdlib) bcrypt hash onto Argon2
     # now that we know the plaintext password -- no forced reset needed.
@@ -318,21 +323,22 @@ async def refresh(
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
     if settings.RATE_LIMIT_ENABLED:
-        # Keyed per session (the refresh token family), not per IP -- a
-        # session legitimately moves across IPs (mobile networks, VPNs),
-        # and the presented token is already the unguessable secret.
-        # This just caps how fast one session can spin through
-        # refreshes, e.g. a buggy client stuck in a retry loop.
-        r = await get_redis()
-        session_key = f"refresh_rate:session:{token_row.family_id}"
-        session_allowed = await check_and_increment(
-            r,
-            session_key,
-            limit=settings.REFRESH_RATE_LIMIT_PER_SESSION,
-            window_seconds=settings.REFRESH_RATE_LIMIT_WINDOW_SECONDS,
-        )
-        if not session_allowed:
-            raise _rate_limited(await r.ttl(session_key))
+        with rate_limit_fails_open("refresh"):
+            # Keyed per session (the refresh token family), not per IP -- a
+            # session legitimately moves across IPs (mobile networks, VPNs),
+            # and the presented token is already the unguessable secret.
+            # This just caps how fast one session can spin through
+            # refreshes, e.g. a buggy client stuck in a retry loop.
+            r = await get_redis()
+            session_key = f"refresh_rate:session:{token_row.family_id}"
+            session_allowed = await check_and_increment(
+                r,
+                session_key,
+                limit=settings.REFRESH_RATE_LIMIT_PER_SESSION,
+                window_seconds=settings.REFRESH_RATE_LIMIT_WINDOW_SECONDS,
+            )
+            if not session_allowed:
+                raise _rate_limited(await r.ttl(session_key))
 
     now = datetime.now(timezone.utc)
 
@@ -663,37 +669,41 @@ async def reauthenticate(
         account_key = f"reauth_rate:account:{user.id}"
         r = None
         if settings.RATE_LIMIT_ENABLED:
-            r = await get_redis()
-            # Peek (don't increment) -- only an actual failed attempt
-            # below should consume this budget, so a request that goes
-            # on to succeed must not have already spent a unit of it
-            # just by arriving. Same peek-then-increment-on-failure
-            # shape as /auth/login's account limit.
-            current_failures = await r.get(account_key)
-            if current_failures:
-                account_ttl = await r.ttl(account_key)
-                if account_ttl == -1:
-                    # Recover a key that somehow lost its expiry (e.g. a
-                    # crash between a prior INCR and its EXPIRE) instead
-                    # of blocking this account forever -- same TTL
-                    # recovery check_and_increment does, needed here too
-                    # since this peek path never calls it.
-                    account_ttl = settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
-                    await r.expire(account_key, account_ttl)
-                if int(current_failures) >= settings.REAUTH_RATE_LIMIT_PER_ACCOUNT:
-                    raise _rate_limited(account_ttl)
+            with rate_limit_fails_open("reauthenticate"):
+                r = await get_redis()
+                # Peek (don't increment) -- only an actual failed attempt
+                # below should consume this budget, so a request that goes
+                # on to succeed must not have already spent a unit of it
+                # just by arriving. Same peek-then-increment-on-failure
+                # shape as /auth/login's account limit.
+                current_failures = await r.get(account_key)
+                if current_failures:
+                    account_ttl = await r.ttl(account_key)
+                    if account_ttl == -1:
+                        # Recover a key that somehow lost its expiry (e.g. a
+                        # crash between a prior INCR and its EXPIRE) instead
+                        # of blocking this account forever -- same TTL
+                        # recovery check_and_increment does, needed here too
+                        # since this peek path never calls it.
+                        account_ttl = settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                        await r.expire(account_key, account_ttl)
+                    if int(current_failures) >= settings.REAUTH_RATE_LIMIT_PER_ACCOUNT:
+                        raise _rate_limited(account_ttl)
 
         # Password users: re-enter it, same check as change-password.
         if not body.password or not verify_password(
             body.password, user.password_hash
         ):
             if r is not None:
-                await check_and_increment(
-                    r,
-                    account_key,
-                    limit=settings.REAUTH_RATE_LIMIT_PER_ACCOUNT,
-                    window_seconds=settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
-                )
+                with rate_limit_fails_open("reauthenticate"):
+                    await check_and_increment(
+                        r,
+                        account_key,
+                        limit=settings.REAUTH_RATE_LIMIT_PER_ACCOUNT,
+                        window_seconds=(
+                            settings.REAUTH_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                        ),
+                    )
             raise HTTPException(
                 status_code=401, detail="Current password is incorrect"
             )
@@ -702,7 +712,8 @@ async def reauthenticate(
             # for this account -- the limit is meant to slow down
             # guessing, not to keep locking out someone who just proved
             # they have the right password.
-            await r.delete(account_key)
+            with rate_limit_fails_open("reauthenticate"):
+                await r.delete(account_key)
     else:
         # OAuth-only users have no password to re-enter -- "complete a
         # fresh provider login" instead (see oauth_authorize's `reauth`
@@ -773,19 +784,20 @@ async def resend_verification(
         return MessageResponse(detail="Email already verified")
 
     if settings.RATE_LIMIT_ENABLED:
-        # Per user, not per IP -- this is authenticated, and the thing
-        # being protected is the mailbox getting flooded, not the
-        # endpoint's throughput.
-        r = await get_redis()
-        user_key = f"resend_verification_rate:user:{user.id}"
-        allowed = await check_and_increment(
-            r,
-            user_key,
-            limit=settings.RESEND_VERIFICATION_RATE_LIMIT_PER_USER,
-            window_seconds=settings.RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
-        )
-        if not allowed:
-            raise _rate_limited(await r.ttl(user_key))
+        with rate_limit_fails_open("resend_verification"):
+            # Per user, not per IP -- this is authenticated, and the thing
+            # being protected is the mailbox getting flooded, not the
+            # endpoint's throughput.
+            r = await get_redis()
+            user_key = f"resend_verification_rate:user:{user.id}"
+            allowed = await check_and_increment(
+                r,
+                user_key,
+                limit=settings.RESEND_VERIFICATION_RATE_LIMIT_PER_USER,
+                window_seconds=settings.RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
+            )
+            if not allowed:
+                raise _rate_limited(await r.ttl(user_key))
 
     # Reachable while unverified even when REQUIRE_EMAIL_VERIFICATION_
     # BEFORE_LOGIN is off, and it's the escape hatch for the case where
@@ -851,37 +863,38 @@ async def forgot_password(
     substantially closing the gap, not claiming to make it disappear.
     """
     if settings.RATE_LIMIT_ENABLED:
-        r = await get_redis()
-        ip_key = f"password_reset_request_rate:ip:{get_client_ip(request)}"
-        ip_allowed = await check_and_increment(
-            r,
-            ip_key,
-            limit=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP,
-            window_seconds=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_IP_WINDOW_SECONDS,
-        )
-        if not ip_allowed:
-            raise _rate_limited(await r.ttl(ip_key))
+        with rate_limit_fails_open("forgot_password"):
+            r = await get_redis()
+            ip_key = f"password_reset_request_rate:ip:{get_client_ip(request)}"
+            ip_allowed = await check_and_increment(
+                r,
+                ip_key,
+                limit=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP,
+                window_seconds=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_IP_WINDOW_SECONDS,
+            )
+            if not ip_allowed:
+                raise _rate_limited(await r.ttl(ip_key))
 
-        # Unlike login's per-account limit (which only counts actual
-        # failures), this counts *every* request against the submitted
-        # email unconditionally -- there's no success/failure split
-        # visible to the caller here, so an unknown email must consume
-        # the same budget a real one would, or the limiter itself would
-        # leak which emails are registered.
-        account_key = (
-            f"password_reset_request_rate:account:"
-            f"{bounded_identifier(body.email.lower())}"
-        )
-        account_allowed = await check_and_increment(
-            r,
-            account_key,
-            limit=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT,
-            window_seconds=(
-                settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
-            ),
-        )
-        if not account_allowed:
-            raise _rate_limited(await r.ttl(account_key))
+            # Unlike login's per-account limit (which only counts actual
+            # failures), this counts *every* request against the submitted
+            # email unconditionally -- there's no success/failure split
+            # visible to the caller here, so an unknown email must consume
+            # the same budget a real one would, or the limiter itself would
+            # leak which emails are registered.
+            account_key = (
+                f"password_reset_request_rate:account:"
+                f"{bounded_identifier(body.email.lower())}"
+            )
+            account_allowed = await check_and_increment(
+                r,
+                account_key,
+                limit=settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT,
+                window_seconds=(
+                    settings.PASSWORD_RESET_REQUEST_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
+                ),
+            )
+            if not account_allowed:
+                raise _rate_limited(await r.ttl(account_key))
 
     user = await find_user_by_email(session, body.email)
     # Deactivated accounts are silently skipped too -- same reasoning as
@@ -922,16 +935,17 @@ async def reset_password(
     normally would.
     """
     if settings.RATE_LIMIT_ENABLED:
-        r = await get_redis()
-        ip_key = f"password_reset_rate:ip:{get_client_ip(request)}"
-        ip_allowed = await check_and_increment(
-            r,
-            ip_key,
-            limit=settings.PASSWORD_RESET_RATE_LIMIT_PER_IP,
-            window_seconds=settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS,
-        )
-        if not ip_allowed:
-            raise _rate_limited(await r.ttl(ip_key))
+        with rate_limit_fails_open("reset_password"):
+            r = await get_redis()
+            ip_key = f"password_reset_rate:ip:{get_client_ip(request)}"
+            ip_allowed = await check_and_increment(
+                r,
+                ip_key,
+                limit=settings.PASSWORD_RESET_RATE_LIMIT_PER_IP,
+                window_seconds=settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS,
+            )
+            if not ip_allowed:
+                raise _rate_limited(await r.ttl(ip_key))
 
     token = await claim_password_reset_token(
         session, hash_verification_token(body.token)
