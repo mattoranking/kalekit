@@ -147,7 +147,7 @@ async def committed_owner_org_and_invitation(
     """
     async with AsyncSession(engine, expire_on_commit=False) as setup_session:
         owner = await create_user(
-            setup_session, "race-owner@example.com", "password123"
+            setup_session, "race-owner@example.com", "password12345"
         )
         organization = await create_organization(
             setup_session, name="Race Co", created_by=owner.id
@@ -156,7 +156,7 @@ async def committed_owner_org_and_invitation(
             setup_session, organization_id=organization.id, user_id=owner.id
         )
         invitee = await create_user(
-            setup_session, "race-member@example.com", "password123"
+            setup_session, "race-member@example.com", "password12345"
         )
         raw_token = generate_invitation_token()
         await create_invitation(

@@ -3,12 +3,13 @@ from datetime import datetime
 
 from pydantic import BaseModel, EmailStr
 
+from kalekit.auth.password_policy import NewPassword
 from kalekit.organization.schemas import OrganizationResponse
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: NewPassword
     organization_name: str | None = None
 
 
