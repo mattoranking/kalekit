@@ -11,7 +11,32 @@ implementation would add here.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import redis.asyncio as redis
+import structlog
+from redis.exceptions import RedisError
+
+logger = structlog.get_logger()
+
+
+@contextmanager
+def rate_limit_fails_open(endpoint: str) -> Iterator[None]:
+    """Let the request through if Redis fails inside the block (#106).
+
+    Rate limiting is an abuse-prevention control, not an authorization
+    gate: refusing every request on a rate-limited endpoint because
+    Redis can't count attempts is worse than allowing unlimited attempts
+    for the length of a short outage. So a `RedisError` raised by any
+    limiter call in the block is logged and swallowed. Other exceptions,
+    including the 429 `HTTPException` raised when a limit is exceeded,
+    propagate untouched.
+    """
+    try:
+        yield
+    except RedisError:
+        logger.warning("rate_limit_check_failed", endpoint=endpoint, exc_info=True)
 
 
 async def check_and_increment(
@@ -37,4 +62,4 @@ async def check_and_increment(
     return count <= limit
 
 
-__all__ = ["check_and_increment"]
+__all__ = ["check_and_increment", "rate_limit_fails_open"]

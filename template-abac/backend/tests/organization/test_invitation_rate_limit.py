@@ -123,3 +123,40 @@ async def test_an_org_exceeded_request_does_not_burn_the_inviters_own_quota(
     # request above had incorrectly also burned it, this would be her
     # third hit against a limit of 2 and get rejected instead.
     assert third.status_code == 202  # org_b: 1/1, alice: 2/2
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_invitations_fail_open_when_redis_is_down(
+    client, register, login, auth_header, org_id_for, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rate limiting is an abuse control, not an authorization gate: a
+    Redis outage must let the invitation through (#106), not surface as
+    a 500 and not refuse every invitation."""
+    import redis.exceptions
+
+    class _DeadRedis:
+        def __getattr__(self, name: str):
+            async def _fail(*args: object, **kwargs: object) -> None:
+                raise redis.exceptions.ConnectionError("simulated redis outage")
+
+            return _fail
+
+    async def _dead_get_redis() -> _DeadRedis:
+        return _DeadRedis()
+
+    monkeypatch.setattr("kalekit.organization.endpoints.get_redis", _dead_get_redis)
+    monkeypatch.setattr(settings, "INVITATION_RATE_LIMIT_PER_ORG", 1)
+
+    await register("alice@example.com")
+    token_alice = await login("alice@example.com")
+    org_a = await org_id_for("alice@example.com")
+
+    # Past the (tiny) org limit, to show the limiter is not consulted
+    # at all rather than silently counting somewhere.
+    for i in range(2):
+        response = await client.post(
+            f"/v1/organizations/{org_a}/invitations",
+            json={"email": f"invitee-{i}@example.com"},
+            headers=auth_header(token_alice),
+        )
+        assert response.status_code == 202
