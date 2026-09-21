@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from kalekit.auth.repository import find_user_by_email
 from kalekit.models.oauth_account import OAuthAccount
@@ -16,7 +17,11 @@ async def find_oauth_account(
     account_id: str,
 ) -> OAuthAccount | None:
     result = await session.execute(
-        select(OAuthAccount).where(
+        select(OAuthAccount)
+        # Eager-load: find_or_create_oauth_user returns account.user, and a
+        # lazy load there raises MissingGreenlet under the async session.
+        .options(selectinload(OAuthAccount.user))
+        .where(
             OAuthAccount.platform == platform,
             OAuthAccount.account_id == account_id,
         )
@@ -30,8 +35,6 @@ async def find_or_create_oauth_user(
     platform: str,
     account_id: str,
     account_email: str | None,
-    access_token: str,
-    refresh_token: str | None = None,
     display_name: str | None = None,
 ) -> User:
     """Link an OAuth identity to a User, creating one if needed.
@@ -51,11 +54,6 @@ async def find_or_create_oauth_user(
     # 1. Already linked?
     existing = await find_oauth_account(session, platform, account_id)
     if existing:
-        # Update the stored tokens in case they were rotated
-        existing.access_token = access_token
-        if refresh_token:
-            existing.refresh_token = refresh_token
-        await session.flush()
         return existing.user
 
     # 2. Email match → account merging
@@ -98,8 +96,6 @@ async def find_or_create_oauth_user(
         platform=platform,
         account_id=account_id,
         account_email=account_email,
-        access_token=access_token,
-        refresh_token=refresh_token,
     )
     session.add(oauth_account)
     await session.flush()
