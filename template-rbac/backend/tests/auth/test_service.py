@@ -10,15 +10,9 @@ from kalekit.auth.service import (
     create_access_token,
     generate_refresh_token,
     hash_password,
-    verify_and_upgrade_password,
     verify_password,
 )
 from kalekit.config import settings
-
-# A hash produced by the pre-migration passlib/bcrypt setup, kept here so
-# tests can prove old accounts still verify (and get upgraded) after the
-# switch to pwdlib/Argon2. Corresponds to the password "correct-password".
-LEGACY_BCRYPT_HASH = "$2b$12$fVcEWj4wDMGN/yfRQAywQOHPaZ3rPZ40inFuNlnwkGuym1KhnL1mu"
 
 
 def test_hash_password_produces_an_argon2_hash() -> None:
@@ -47,37 +41,6 @@ def test_verify_password_rejects_wrong_password() -> None:
     hashed = hash_password("correct-password")
 
     assert verify_password("wrong-password", hashed) is False
-
-
-def test_verify_and_upgrade_password_leaves_argon2_hash_unchanged() -> None:
-    hashed = hash_password("correct-password")
-
-    valid, upgraded = verify_and_upgrade_password("correct-password", hashed)
-
-    assert valid is True
-    assert upgraded is None
-
-
-def test_verify_and_upgrade_password_upgrades_legacy_bcrypt_hash() -> None:
-    """A password hashed under the old passlib/bcrypt scheme must still
-    verify, and the presented hash should come back re-hashed under the
-    now-preferred Argon2 scheme so the caller (login) can persist it."""
-    valid, upgraded = verify_and_upgrade_password(
-        "correct-password", LEGACY_BCRYPT_HASH
-    )
-
-    assert valid is True
-    assert upgraded is not None
-    assert upgraded.startswith("$argon2")
-    # And the freshly-upgraded hash verifies the same password.
-    assert verify_password("correct-password", upgraded) is True
-
-
-def test_verify_and_upgrade_password_rejects_wrong_password_for_legacy_hash() -> None:
-    valid, upgraded = verify_and_upgrade_password("wrong-password", LEGACY_BCRYPT_HASH)
-
-    assert valid is False
-    assert upgraded is None
 
 
 def test_create_access_token_carries_kid_header() -> None:

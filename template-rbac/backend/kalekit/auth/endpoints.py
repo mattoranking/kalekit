@@ -77,7 +77,6 @@ from kalekit.auth.service import (
     hash_verification_token,
     password_reset_token_expiry,
     verification_token_expiry,
-    verify_and_upgrade_password,
     verify_password,
 )
 from kalekit.config import settings
@@ -237,13 +236,11 @@ async def login(
 
     # Always run a hash verification, even when the email doesn't exist,
     # so the response timing for "unknown email" and "wrong password" is
-    # indistinguishable -- otherwise the (deliberately slow) bcrypt check
+    # indistinguishable -- otherwise the (deliberately slow) Argon2 check
     # being skipped for unknown emails would let an attacker enumerate
     # registered accounts by measuring response latency.
     password_hash = (user.password_hash if user else None) or DUMMY_PASSWORD_HASH
-    password_valid, upgraded_hash = verify_and_upgrade_password(
-        body.password, password_hash
-    )
+    password_valid = verify_password(body.password, password_hash)
 
     if not user or not password_valid:
         if r is not None:
@@ -267,14 +264,6 @@ async def login(
         # the right password.
         with rate_limit_fails_open("login"):
             await r.delete(account_key)
-
-    # Transparently move a legacy (pre-pwdlib) bcrypt hash onto Argon2
-    # now that we know the plaintext password -- no forced reset needed.
-    # Done only once every other check has passed, so a login that's
-    # ultimately rejected never mutates the stored hash as a side effect.
-    if upgraded_hash is not None:
-        user.password_hash = upgraded_hash
-        await session.flush()
 
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
