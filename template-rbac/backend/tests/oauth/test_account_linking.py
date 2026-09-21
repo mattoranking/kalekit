@@ -38,7 +38,6 @@ async def test_oauth_does_not_link_to_an_unverified_local_account(
             platform="google",
             account_id="victim-google-id",
             account_email="victim@example.com",
-            access_token="token",
             provider_email_verified=True,
         )
 
@@ -65,7 +64,6 @@ async def test_oauth_does_not_link_when_provider_email_is_unverified(
             platform="google",
             account_id="some-google-id",
             account_email="verified-owner@example.com",
-            access_token="token",
             provider_email_verified=False,
         )
 
@@ -85,7 +83,6 @@ async def test_oauth_links_when_both_sides_are_verified(
         platform="google",
         account_id="legit-google-id",
         account_email="legit@example.com",
-        access_token="token",
         provider_email_verified=True,
     )
 
@@ -106,7 +103,6 @@ async def test_new_oauth_user_is_verified_when_provider_says_so(
         platform="google",
         account_id="brand-new-verified",
         account_email="brand-new-verified@example.com",
-        access_token="token",
         provider_email_verified=True,
     )
 
@@ -126,7 +122,6 @@ async def test_new_oauth_user_is_unverified_when_provider_does_not_confirm(
         platform="twitter",
         account_id="brand-new-twitter",
         account_email=None,
-        access_token="token",
         provider_email_verified=False,
     )
 

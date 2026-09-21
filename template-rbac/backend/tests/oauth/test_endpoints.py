@@ -4,11 +4,13 @@ from urllib.parse import parse_qs, urlsplit
 import jwt
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from kalekit.auth.permissions import get_redis
 from kalekit.auth.repository import get_refresh_token_by_hash
 from kalekit.auth.service import hash_refresh_token
 from kalekit.config import settings
+from kalekit.models.oauth_account import OAuthAccount
 from kalekit.oauth.client import OAUTH_PROVIDERS
 
 
@@ -367,3 +369,65 @@ async def test_oauth_login_mints_a_token_bound_to_the_requested_client(
         audience="admin",
     )
     assert payload["aud"] == "admin"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_oauth_login_stores_no_provider_token_and_matches_returning_user(
+    client: AsyncClient, session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Login only (#115): the provider's tokens are used in memory to read
+    the profile and never persisted, and a returning user is matched by
+    platform + account_id."""
+    github = OAUTH_PROVIDERS["github"]
+
+    async def fake_exchange_code(code: str, code_verifier: str | None = None) -> dict:
+        return {
+            "access_token": "provider-secret-access",
+            "refresh_token": "provider-secret-refresh",
+        }
+
+    async def fake_get_user_info(access_token: str) -> dict:
+        return {"id": 424242, "email": "no-provider-token@example.com"}
+
+    async def fake_email_verified(*args: object, **kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(github, "exchange_code", fake_exchange_code)
+    monkeypatch.setattr(github, "get_user_info", fake_get_user_info)
+    monkeypatch.setattr(
+        "kalekit.oauth.endpoints._get_provider_email_verified", fake_email_verified
+    )
+
+    for _ in range(2):  # first login creates, second is a returning user
+        state = await _prime_state(client)
+        response = await client.get(
+            "/v1/oauth/github/callback",
+            params={"code": "provider-code", "state": state},
+            follow_redirects=False,
+        )
+        assert response.status_code in (302, 307)
+
+    session.expire_all()
+    rows = (
+        (
+            await session.execute(
+                select(OAuthAccount).where(
+                    OAuthAccount.platform == "github",
+                    OAuthAccount.account_id == "424242",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1  # the returning login matched, it did not duplicate
+
+    account = rows[0]
+    assert account.account_email == "no-provider-token@example.com"
+    assert not hasattr(OAuthAccount, "access_token")
+    assert not hasattr(OAuthAccount, "refresh_token")
+    stored = {c.name for c in OAuthAccount.__table__.columns}
+    assert not any("token" in name for name in stored)
+    assert all(
+        "provider-secret" not in str(getattr(account, name)) for name in stored
+    )

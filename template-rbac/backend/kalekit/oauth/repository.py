@@ -39,8 +39,6 @@ async def find_or_create_oauth_user(
     platform: str,
     account_id: str,
     account_email: str | None,
-    access_token: str,
-    refresh_token: str | None = None,
     provider_email_verified: bool = False,
 ) -> User:
     """Link an OAuth identity to a User, creating one if needed.
@@ -67,11 +65,6 @@ async def find_or_create_oauth_user(
     # 1. Already linked?
     existing = await find_oauth_account(session, platform, account_id)
     if existing:
-        # Update the stored tokens in case they were rotated
-        existing.access_token = access_token
-        if refresh_token:
-            existing.refresh_token = refresh_token
-        await session.flush()
         return existing.user
 
     # 2. Email match → account merging, gated on verification both ways
@@ -123,8 +116,6 @@ async def find_or_create_oauth_user(
         platform=platform,
         account_id=account_id,
         account_email=account_email,
-        access_token=access_token,
-        refresh_token=refresh_token,
     )
     session.add(oauth_account)
     await session.flush()
