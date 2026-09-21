@@ -45,7 +45,7 @@ from kalekit.organization.service import (
 from kalekit.postgres import get_db_session
 from kalekit.redis import get_redis
 from kalekit.utils.email import get_email_sender, send_invitation_email
-from kalekit.utils.rate_limit import check_and_increment
+from kalekit.utils.rate_limit import check_and_increment, rate_limit_fails_open
 
 # Not scoped to a single organization_id -- this lists the caller's own
 # memberships, so it lives at /organizations rather than
@@ -291,33 +291,35 @@ async def create_organization_invitation(
         # organization_id.
         raise HTTPException(status_code=404, detail="Not found")
 
-    r = await get_redis()
-    # Check/increment the org-wide limit first, and only touch the
-    # inviter's personal counter if that passes. An org already at its
-    # limit shouldn't also burn quota from an inviter who did nothing
-    # wrong -- the reverse (an inviter-exceeded request still costing
-    # the org a unit) is fine to leave as-is, since it's still a real
-    # attempted invite against that org's overall throughput.
-    org_allowed = await check_and_increment(
-        r,
-        f"invitation_rate:org:{organization_id}",
-        limit=settings.INVITATION_RATE_LIMIT_PER_ORG,
-        window_seconds=settings.INVITATION_RATE_LIMIT_WINDOW_SECONDS,
-    )
-    if not org_allowed:
-        raise HTTPException(
-            status_code=429, detail="Too many invitations, try again later"
+    # Fails open (#107): if Redis can't count, the invitation goes through.
+    with rate_limit_fails_open("invitation"):
+        r = await get_redis()
+        # Check/increment the org-wide limit first, and only touch the
+        # inviter's personal counter if that passes. An org already at its
+        # limit shouldn't also burn quota from an inviter who did nothing
+        # wrong -- the reverse (an inviter-exceeded request still costing
+        # the org a unit) is fine to leave as-is, since it's still a real
+        # attempted invite against that org's overall throughput.
+        org_allowed = await check_and_increment(
+            r,
+            f"invitation_rate:org:{organization_id}",
+            limit=settings.INVITATION_RATE_LIMIT_PER_ORG,
+            window_seconds=settings.INVITATION_RATE_LIMIT_WINDOW_SECONDS,
         )
-    inviter_allowed = await check_and_increment(
-        r,
-        f"invitation_rate:user:{caller.user.id}",
-        limit=settings.INVITATION_RATE_LIMIT_PER_INVITER,
-        window_seconds=settings.INVITATION_RATE_LIMIT_WINDOW_SECONDS,
-    )
-    if not inviter_allowed:
-        raise HTTPException(
-            status_code=429, detail="Too many invitations, try again later"
+        if not org_allowed:
+            raise HTTPException(
+                status_code=429, detail="Too many invitations, try again later"
+            )
+        inviter_allowed = await check_and_increment(
+            r,
+            f"invitation_rate:user:{caller.user.id}",
+            limit=settings.INVITATION_RATE_LIMIT_PER_INVITER,
+            window_seconds=settings.INVITATION_RATE_LIMIT_WINDOW_SECONDS,
         )
+        if not inviter_allowed:
+            raise HTTPException(
+                status_code=429, detail="Too many invitations, try again later"
+            )
 
     email = body.email.lower()
     raw_token = generate_invitation_token()
