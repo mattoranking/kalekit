@@ -2,7 +2,7 @@ import os
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import PostgresDsn
+from pydantic import Field, PostgresDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 type PostgresDriver = Literal["psycopg2", "asyncpg"]
@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     # multiple instances, so two requests can race to refresh the same
     # token with no in-process lock to prevent it.
     REFRESH_TOKEN_GRACE_PERIOD_SECONDS: int = 45
+
+    # Password length rule (see auth/password_policy.py): enforced when a
+    # password is set (register); only the maximum is enforced at login.
+    # Counted in characters. Length is the whole rule -- no composition
+    # requirements (NIST SP 800-63B).
+    PASSWORD_MIN_LENGTH: int = Field(default=12, ge=1)
+    PASSWORD_MAX_LENGTH: int = Field(default=128, ge=1)
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -123,6 +130,15 @@ class Settings(BaseSettings):
         env_file=env_file,
         extra="allow",
     )
+
+    @model_validator(mode="after")
+    def _validate_password_length_bounds(self) -> "Settings":
+        if self.PASSWORD_MIN_LENGTH > self.PASSWORD_MAX_LENGTH:
+            raise ValueError(
+                "KALEKIT_PASSWORD_MIN_LENGTH must not exceed "
+                "KALEKIT_PASSWORD_MAX_LENGTH"
+            )
+        return self
 
     def is_read_replica_configured(self) -> bool:
         return self.POSTGRES_READ_HOST is not None

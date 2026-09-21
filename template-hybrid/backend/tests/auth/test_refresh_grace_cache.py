@@ -125,10 +125,10 @@ class _GraceKeysFailRedis:
 
 async def _login_refresh_token(client: AsyncClient, email: str) -> str:
     await client.post(
-        "/v1/auth/register", json={"email": email, "password": "password123"}
+        "/v1/auth/register", json={"email": email, "password": "password12345"}
     )
     response = await client.post(
-        "/v1/auth/login", json={"email": email, "password": "password123"}
+        "/v1/auth/login", json={"email": email, "password": "password12345"}
     )
     assert response.status_code == 200, response.text
     return response.json()["refresh_token"]
