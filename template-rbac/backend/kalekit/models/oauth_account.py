@@ -22,8 +22,6 @@ class OAuthAccount(RecordModel):
     platform: Mapped[str] = mapped_column(String(50), nullable=False)
     account_id: Mapped[str] = mapped_column(String(255), nullable=False)
     account_email: Mapped[str | None] = mapped_column(String(255))
-    access_token: Mapped[str] = mapped_column(String, nullable=False)
-    refresh_token: Mapped[str | None] = mapped_column(String)
 
     user: Mapped["User"] = relationship(
         back_populates="oauth_accounts", lazy="selectin"

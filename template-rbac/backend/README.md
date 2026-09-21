@@ -63,3 +63,14 @@ never touched regardless of age. Wire this into whatever cron/scheduled-job
 mechanism your deployment already has (e.g. a daily job); 30 days is a
 reasonable default but pick a window based on how far back you want to be
 able to investigate a compromised-session incident.
+
+## OAuth: login only, no provider tokens stored
+
+Google, GitHub and X are used for login only. The callback exchanges the
+code and reads the profile in memory, then issues Kalekit's own access and
+refresh tokens; the provider's tokens are never persisted. `oauth_accounts`
+holds `platform`, `account_id` (the provider's stable id, which is how a
+returning user is matched), `account_email` and `user_id`. If you later need
+to call a provider's API on the user's behalf, add an encrypted token store
+then. Sign in with Apple (#19) will need one to revoke the token when an
+account is deleted.

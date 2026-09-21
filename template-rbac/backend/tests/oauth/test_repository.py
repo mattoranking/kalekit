@@ -17,7 +17,6 @@ async def test_first_oauth_user_becomes_visitor_not_admin(
         platform="github",
         account_id="12345",
         account_email="oauth-first@example.com",
-        access_token="provider-token",
     )
 
     roles = [ur.role.name for ur in user.roles]
@@ -31,7 +30,6 @@ async def test_second_oauth_user_becomes_visitor(session: AsyncSession) -> None:
         platform="github",
         account_id="11111",
         account_email="first@example.com",
-        access_token="token-1",
     )
 
     user = await find_or_create_oauth_user(
@@ -39,7 +37,6 @@ async def test_second_oauth_user_becomes_visitor(session: AsyncSession) -> None:
         platform="google",
         account_id="22222",
         account_email="oauth-second@example.com",
-        access_token="token-2",
     )
 
     roles = [ur.role.name for ur in user.roles]
@@ -57,7 +54,6 @@ async def test_relinking_an_existing_oauth_account_does_not_reassign_a_role(
         platform="github",
         account_id="33333",
         account_email="returning@example.com",
-        access_token="token-a",
     )
     first_roles = [ur.role.name for ur in first.roles]
 
@@ -66,7 +62,6 @@ async def test_relinking_an_existing_oauth_account_does_not_reassign_a_role(
         platform="github",
         account_id="33333",
         account_email="returning@example.com",
-        access_token="token-b",
     )
     again_roles = [ur.role.name for ur in again.roles]
 
