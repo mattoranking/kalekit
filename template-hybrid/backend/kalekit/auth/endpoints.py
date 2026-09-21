@@ -185,6 +185,9 @@ async def refresh(
         # direct predecessor: treat as a stolen/replayed token and kill
         # every token in the family.
         await revoke_refresh_token_family(session, token_row.family_id)
+        # get_db_session rolls back on any exception, which would undo the
+        # revoke above (#112). Commit it before raising.
+        await session.commit()
         raise HTTPException(status_code=401, detail="Refresh token already used")
 
     if token_row.expires_at < now:
