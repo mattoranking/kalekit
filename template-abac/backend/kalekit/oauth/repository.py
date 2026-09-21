@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from kalekit.auth.repository import find_user_by_email
 from kalekit.models.oauth_account import OAuthAccount
@@ -15,10 +16,14 @@ async def find_oauth_account(
     account_id: str,
 ) -> OAuthAccount | None:
     result = await session.execute(
-        select(OAuthAccount).where(
+        select(OAuthAccount)
+        .where(
             OAuthAccount.platform == platform,
             OAuthAccount.account_id == account_id,
         )
+        # The callers read .user; a lazy load there raises MissingGreenlet
+        # on an async session.
+        .options(selectinload(OAuthAccount.user))
     )
     return result.scalar_one_or_none()
 
