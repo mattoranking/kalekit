@@ -57,12 +57,20 @@ async def session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession]:
     """
     Provide a session that is rolled back after each test for isolation.
 
-    The dependency overrides never commit, so rollback cleanly
-    removes all flushed-but-uncommitted test data.
+    The session runs inside an outer transaction and each commit becomes
+    a savepoint release, so the endpoints that commit on purpose (the
+    refresh revoke, #112) do not leak rows into later tests; the outer
+    rollback removes everything.
     """
-    async with AsyncSession(engine, expire_on_commit=False) as session:
-        yield session
-        await session.rollback()
+    async with engine.connect() as conn:
+        outer = await conn.begin()
+        async with AsyncSession(
+            bind=conn,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        ) as session:
+            yield session
+        await outer.rollback()
 
 
 @pytest_asyncio.fixture(loop_scope="session")

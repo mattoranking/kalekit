@@ -299,6 +299,21 @@ async def login(
 logger = structlog.get_logger()
 
 
+async def _revoke_family_and_commit(
+    session: AsyncSession, family_id: uuid.UUID
+) -> None:
+    """Revoke a refresh token family and commit it right away.
+
+    The refresh branches that revoke a family then raise HTTPException(401).
+    `get_db_session` rolls back on any exception, which would undo the
+    revoke and leave a detected-stolen session's refresh tokens active in
+    the database (#112). Committing before the raise makes the revoke
+    stick; the response is unchanged.
+    """
+    await revoke_refresh_token_family(session, family_id)
+    await session.commit()
+
+
 def _revocation_unavailable(event: str) -> JSONResponse:
     """A clean 503 for a Redis failure while blocking a revoked token (#108).
 
@@ -411,7 +426,7 @@ async def refresh(
         # the last legitimate login/refresh) would keep working for
         # the rest of its natural lifetime despite the family being
         # revoked, undercutting the whole point of reuse detection.
-        await revoke_refresh_token_family(session, token_row.family_id)
+        await _revoke_family_and_commit(session, token_row.family_id)
         try:
             await block_family_tokens(str(token_row.family_id))
         except RedisError:
@@ -438,7 +453,7 @@ async def refresh(
         # trusted" cases above: fail closed with a 401 and revoke the
         # family, rather than let an unhandled ValueError surface as a
         # 500. See the round-2 Copilot review on PR #75.
-        await revoke_refresh_token_family(session, token_row.family_id)
+        await _revoke_family_and_commit(session, token_row.family_id)
         await block_family_tokens(str(token_row.family_id))
         raise HTTPException(status_code=401, detail="Refresh token invalid")
 
@@ -455,7 +470,7 @@ async def refresh(
         absolute_timeout is not None
         and now - token_row.family_created_at > absolute_timeout
     ):
-        await revoke_refresh_token_family(session, token_row.family_id)
+        await _revoke_family_and_commit(session, token_row.family_id)
         await block_family_tokens(str(token_row.family_id))
         raise HTTPException(status_code=401, detail="Session expired")
 
