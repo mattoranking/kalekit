@@ -15,9 +15,9 @@ and leaves it running.
 ├── backend/       FastAPI + uv — auth (see below), OAuth2 (GitHub/Google/X),
 │                  SQLAlchemy 2 async, Alembic, pytest
 ├── apps/
-│   ├── web/       Next.js 15 (App Router) + Tailwind
-│   ├── site/      Next.js 15  (marketing)
-│   ├── admin/     Next.js 15  (ops panel)
+│   ├── web/       Next.js 16 (App Router) + Tailwind
+│   ├── site/      Next.js 16  (marketing)
+│   ├── admin/     Next.js 16  (ops panel)
 │   └── mobile/    Expo SDK 53 + expo-router + EAS profiles
 ├── packages/
 │   ├── config/       shared tsconfig + Tailwind preset
