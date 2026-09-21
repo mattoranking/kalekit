@@ -83,7 +83,6 @@ async def test_listing_members_with_null_email_returns_200(
         platform="twitter",
         account_id="no-email-user",
         account_email=None,
-        access_token="token",
     )
     await add_member_repo(
         session, organization_id=uuid.UUID(org_a), user_id=oauth_user.id

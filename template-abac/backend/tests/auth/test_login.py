@@ -58,7 +58,6 @@ async def test_login_against_oauth_only_account_returns_401_not_500(
         platform="github",
         account_id="oauth-only-1",
         account_email="oauth-only@example.com",
-        access_token="token",
     )
 
     response = await client.post(
