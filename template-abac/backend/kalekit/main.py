@@ -16,6 +16,7 @@ from kalekit.postgres import (
     create_async_engine,
     create_async_read_engine,
 )
+from kalekit.security import configure_security
 from kalekit.utils.db.database import (
     AsyncEngine,
     AsyncReadSessionMaker,
@@ -98,6 +99,7 @@ def create_app() -> FastAPI:
     )
 
     configure_cors(app)
+    configure_security(app)
 
     if not settings.is_testing():
         app.add_middleware(AsyncSessionMiddleware)

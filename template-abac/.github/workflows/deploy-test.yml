@@ -256,6 +256,7 @@ jobs:
                   KALEKIT_POSTGRES_PORT: 5432
                   KALEKIT_POSTGRES_DATABASE: kalekit_preview_${SLUG}
                   KALEKIT_CORS_ORIGINS: https://${SLUG}.test.kalekit.one
+                  KALEKIT_ALLOWED_HOSTS: ${SLUG}.test-api.kalekit.one,localhost,127.0.0.1
                   GEMINI_API_KEY: ${GEMINI_API_KEY}
                 expose:
                   - "8000"
@@ -274,7 +275,6 @@ jobs:
                   - "traefik.http.routers.${SLUG}-backend.middlewares=${SLUG}-headers"
                   - "traefik.http.middlewares.${SLUG}-headers.headers.stsSeconds=31536000"
                   - "traefik.http.middlewares.${SLUG}-headers.headers.stsIncludeSubdomains=true"
-                  - "traefik.http.middlewares.${SLUG}-headers.headers.contentTypeNosniff=true"
                   - "traefik.http.middlewares.${SLUG}-headers.headers.browserXssFilter=true"
                 healthcheck:
                   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
