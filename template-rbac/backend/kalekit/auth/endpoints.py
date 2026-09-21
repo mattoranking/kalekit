@@ -2,7 +2,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -304,6 +307,43 @@ async def login(
         refresh_token=refresh_token)
 
 
+logger = structlog.get_logger()
+
+
+def _revocation_unavailable(event: str) -> JSONResponse:
+    """A clean 503 for a Redis failure while blocking a revoked token (#108).
+
+    Redis is the only home of the access-token blocklist, so when the
+    block can't be written the revoked token would stay usable until it
+    expires. Fail closed: tell the client the sign-out/revocation did
+    not complete so it retries. The database revoke that ran just before
+    is idempotent, so a retry is safe.
+
+    Returned rather than raised, on purpose: an HTTPException would run
+    get_db_session's rollback and undo the database revoke, while a
+    normal response lets it commit. Call from inside an `except
+    RedisError` block so the traceback is attached to the log.
+    """
+    logger.warning(event, exc_info=True)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Could not complete sign-out, please try again"},
+    )
+
+
+def _reauth_unavailable() -> HTTPException:
+    """A clean 503 when the re-auth ticket can't be read from Redis (#108).
+
+    The ticket lives only in Redis, so there is nothing to fall back to;
+    same direction as the OAuth state paths (#99). Call from inside an
+    `except RedisError` block.
+    """
+    logger.warning("oauth_reauth_ticket_consume_failed", exc_info=True)
+    return HTTPException(
+        status_code=503, detail="OAuth sign-in is temporarily unavailable"
+    )
+
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh(
     body: RefreshRequest,
@@ -383,7 +423,13 @@ async def refresh(
         # the rest of its natural lifetime despite the family being
         # revoked, undercutting the whole point of reuse detection.
         await revoke_refresh_token_family(session, token_row.family_id)
-        await block_family_tokens(str(token_row.family_id))
+        try:
+            await block_family_tokens(str(token_row.family_id))
+        except RedisError:
+            # The family is revoked in the database, but the live access
+            # token can't be blocked: fail closed (#108) instead of an
+            # unhandled 500.
+            return _revocation_unavailable("reuse_detection_block_failed")
         raise HTTPException(status_code=401, detail="Refresh token already used")
 
     if token_row.expires_at < now:
@@ -481,7 +527,10 @@ async def logout(
     # for the rest of its natural lifetime -- logging out wouldn't
     # actually revoke the thing that grants access.
     if jti:
-        await block_token(jti)
+        try:
+            await block_token(jti)
+        except RedisError:
+            return _revocation_unavailable("logout_block_token_failed")
 
 
 @router.post("/logout-all", status_code=204)
@@ -726,7 +775,10 @@ async def reauthenticate(
                 status_code=400,
                 detail="OAuth re-authentication required for this account",
             )
-        ticket_user_id = await consume_oauth_reauth_ticket(body.oauth_ticket)
+        try:
+            ticket_user_id = await consume_oauth_reauth_ticket(body.oauth_ticket)
+        except RedisError as exc:
+            raise _reauth_unavailable() from exc
         if ticket_user_id is None or ticket_user_id != str(user.id):
             raise HTTPException(
                 status_code=401,

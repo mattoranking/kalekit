@@ -45,8 +45,21 @@ async def get_permissions_for_roles(
                 "role_permission_cache_read_failed", role=role, exc_info=True
             )
         if cached:
-            permissions.update(json.loads(cached))
-            continue
+            try:
+                decoded = json.loads(cached)
+                if not isinstance(decoded, list) or not all(
+                    isinstance(p, str) for p in decoded
+                ):
+                    raise ValueError("cached permissions are not a list of strings")
+                permissions.update(decoded)
+                continue
+            except (ValueError, TypeError):
+                # A truthy but corrupt entry (bad JSON, or JSON that is
+                # not a list of strings) is a cache miss, not an error
+                # (#108): reload from the DB and overwrite it below.
+                logger.warning(
+                    "role_permission_cache_corrupt", role=role, exc_info=True
+                )
         # Cache miss (or Redis unavailable) - load from DB then cache
         perms: set[str] = await _load_permissions_from_db(session, role)
         try:

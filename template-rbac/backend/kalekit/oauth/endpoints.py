@@ -386,13 +386,18 @@ async def oauth_exchange(body: OAuthExchangeRequest):
     deleted on first use, so a leaked/replayed URL can't be exchanged
     twice.
     """
-    r = await get_redis()
     exchange_key = f"oauth_exchange:{body.code}"
-    raw = await r.get(exchange_key)
-    if not raw:
-        raise HTTPException(status_code=400, detail="Invalid or expired code")
-
-    await r.delete(exchange_key)
+    # The code lives only in Redis: fail closed with a clean 503 (#108).
+    # If the delete fails after the read, the code is not consumed, so
+    # refuse rather than hand out tokens for a code that stays reusable.
+    try:
+        r = await get_redis()
+        raw = await r.get(exchange_key)
+        if not raw:
+            raise HTTPException(status_code=400, detail="Invalid or expired code")
+        await r.delete(exchange_key)
+    except RedisError as exc:
+        raise _oauth_unavailable("oauth_exchange_code_lookup_failed") from exc
 
     return TokenResponse(**json.loads(raw))
 
