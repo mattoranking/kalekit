@@ -54,11 +54,20 @@ backend-db-up: ## Start test database
 backend-db-down: ## Stop test database
 	docker compose down db-test
 
+# Export KEY=VALUE lines from .env.testing, skipping blank and comment lines.
+# A variable that is already set (shell or make command line) wins over the file.
+LOAD_TEST_ENV = while IFS= read -r line || [ -n "$$line" ]; do \
+		case "$$line" in \
+			''|'\#'*) ;; \
+			*=*) k=$${line%%=*}; v=$${line\#*=}; printenv "$$k" > /dev/null || export "$$k=$$v" ;; \
+		esac; \
+	done < .env.testing
+
 backend-test: backend-db-up ## Run backend tests
-	cd $(BACKEND_DIR) && env $$(cat .env.testing | xargs) uv run pytest -v
+	cd $(BACKEND_DIR) && $(LOAD_TEST_ENV) && uv run pytest -v
 
 backend-test-cov: backend-db-up ## Run backend tests with coverage
-	cd $(BACKEND_DIR) && env $$(cat .env.testing | xargs) uv run pytest -v --cov=kalekit --cov-report=term-missing --cov-report=html
+	cd $(BACKEND_DIR) && $(LOAD_TEST_ENV) && uv run pytest -v --cov=kalekit --cov-report=term-missing --cov-report=html
 
 backend-test-ci: backend-lint backend-typecheck backend-test-cov ## Run full backend CI locally
 
