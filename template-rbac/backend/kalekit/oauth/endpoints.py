@@ -23,9 +23,11 @@ from typing import Annotated
 from urllib.parse import urlencode, urlsplit
 
 import httpx
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.client_type import ClientType
@@ -47,6 +49,8 @@ from kalekit.oauth.client import OAUTH_PROVIDERS
 from kalekit.oauth.repository import OAuthAccountLinkingError, find_or_create_oauth_user
 from kalekit.postgres import get_db_session
 
+logger = structlog.get_logger()
+
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
 _STATE_TTL = 600  # 10 minutes
@@ -54,6 +58,22 @@ _STATE_TTL = 600  # 10 minutes
 
 class OAuthExchangeRequest(BaseModel):
     code: str
+
+
+def _oauth_unavailable(event: str) -> HTTPException:
+    """A clean 503 for a Redis failure on an OAuth path (#99).
+
+    The CSRF state (and the one-time exchange code / re-auth ticket the
+    callback hands back) live only in Redis, so there is nothing to
+    degrade to: fail closed, but as a documented "dependency
+    unavailable" response instead of an unhandled 500. Password login
+    doesn't touch this state and stays available. Call from inside an
+    `except RedisError` block so the traceback is attached to the log.
+    """
+    logger.warning(event, exc_info=True)
+    return HTTPException(
+        status_code=503, detail="OAuth sign-in is temporarily unavailable"
+    )
 
 
 def _get_provider(provider: str):
@@ -141,7 +161,6 @@ async def oauth_authorize(
 
     # Store state (and code_verifier for PKCE, the post-login redirect
     # target, and the requesting client) in Redis
-    r = await get_redis()
     state_data = json.dumps(
         {
             "provider": provider,
@@ -151,7 +170,11 @@ async def oauth_authorize(
             "reauth": reauth,
         }
     )
-    await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
+    try:
+        r = await get_redis()
+        await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
+    except RedisError as exc:
+        raise _oauth_unavailable("oauth_state_store_failed") from exc
 
     return {"authorization_url": authorization_url}
 
@@ -178,14 +201,17 @@ async def oauth_callback(
     client = _get_provider(provider)
 
     # --- Validate state ---
-    r = await get_redis()
     state_key = f"oauth_state:{state}"
-    raw_state_data = await r.get(state_key)
-    if not raw_state_data:
-        raise HTTPException(status_code=400, detail="Invalid or expired state")
+    try:
+        r = await get_redis()
+        raw_state_data = await r.get(state_key)
+        if not raw_state_data:
+            raise HTTPException(status_code=400, detail="Invalid or expired state")
 
-    # Delete immediately — state is single-use
-    await r.delete(state_key)
+        # Delete immediately — state is single-use
+        await r.delete(state_key)
+    except RedisError as exc:
+        raise _oauth_unavailable("oauth_state_check_failed") from exc
 
     state_data = json.loads(raw_state_data)
     stored_provider = state_data["provider"]
@@ -272,11 +298,14 @@ async def oauth_callback(
     # its own, can never grant or extend a session by itself.
     if state_data.get("reauth"):
         reauth_ticket = secrets.token_urlsafe(32)
-        await store_oauth_reauth_ticket(
-            reauth_ticket,
-            str(user.id),
-            ttl_seconds=settings.OAUTH_REAUTH_TICKET_TTL_SECONDS,
-        )
+        try:
+            await store_oauth_reauth_ticket(
+                reauth_ticket,
+                str(user.id),
+                ttl_seconds=settings.OAUTH_REAUTH_TICKET_TTL_SECONDS,
+            )
+        except RedisError as exc:
+            raise _oauth_unavailable("oauth_reauth_ticket_store_failed") from exc
         # Insert the query param before any URL fragment rather than
         # blindly appending to the end of redirect_to -- a fragment
         # (#...) is client-side only, so a naive append would put
@@ -327,17 +356,20 @@ async def oauth_callback(
     # code; only that code goes in the redirect URL. The frontend's BFF
     # (see #13) exchanges it server-side via POST /oauth/exchange.
     exchange_code = secrets.token_urlsafe(32)
-    await r.set(
-        f"oauth_exchange:{exchange_code}",
-        json.dumps(
-            {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "token_type": "bearer",
-            }
-        ),
-        ex=settings.OAUTH_EXCHANGE_CODE_TTL_SECONDS,
-    )
+    try:
+        await r.set(
+            f"oauth_exchange:{exchange_code}",
+            json.dumps(
+                {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "token_type": "bearer",
+                }
+            ),
+            ex=settings.OAUTH_EXCHANGE_CODE_TTL_SECONDS,
+        )
+    except RedisError as exc:
+        raise _oauth_unavailable("oauth_exchange_code_store_failed") from exc
 
     separator = "&" if "?" in redirect_to else "?"
     return RedirectResponse(

@@ -16,16 +16,41 @@ is self-contained -- keep the two in sync if this primitive changes.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import redis.asyncio as redis
+import structlog
 from fastapi import Request
+from redis.exceptions import RedisError
 
 from kalekit.config import settings
+
+logger = structlog.get_logger()
 
 # RFC 5321's overall length cap on an email address (local-part@domain).
 # Used as the threshold past which a caller-supplied identifier gets
 # hashed before becoming part of a Redis key -- see bounded_identifier.
 MAX_EMAIL_LENGTH = 254
+
+
+@contextmanager
+def rate_limit_fails_open(endpoint: str) -> Iterator[None]:
+    """Let the request through if Redis fails inside the block (#99).
+
+    Rate limiting is an abuse-prevention control, not an authorization
+    gate: refusing every request on a rate-limited endpoint because
+    Redis can't count attempts is worse than allowing unlimited attempts
+    for the length of a short outage. So a `RedisError` raised by any
+    limiter call in the block is logged and swallowed, which is the same
+    as `RATE_LIMIT_ENABLED = False` for that request. Other exceptions,
+    including the 429 `HTTPException` raised when a limit is exceeded,
+    propagate untouched.
+    """
+    try:
+        yield
+    except RedisError:
+        logger.warning("rate_limit_check_failed", endpoint=endpoint, exc_info=True)
 
 
 async def check_and_increment(
@@ -107,4 +132,9 @@ def get_client_ip(request: Request) -> str:
     return "unknown"
 
 
-__all__ = ["bounded_identifier", "check_and_increment", "get_client_ip"]
+__all__ = [
+    "bounded_identifier",
+    "check_and_increment",
+    "get_client_ip",
+    "rate_limit_fails_open",
+]

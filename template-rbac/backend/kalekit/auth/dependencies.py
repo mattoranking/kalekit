@@ -3,8 +3,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 
 import jwt
+import structlog
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.client_type import ClientType
@@ -15,6 +17,8 @@ from kalekit.auth.permissions import (
 from kalekit.config import settings
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
+
+logger = structlog.get_logger()
 
 bearer_scheme = HTTPBearer()
 
@@ -101,7 +105,20 @@ async def get_current_user(
     jti = payload.get("jti")
     sid = payload.get("sid")
 
-    if await is_any_blocked(jti, user_id, sid):
+    # Fail closed (#99): revocation state lives only in Redis, so if it
+    # can't be read there is no way to tell a live token from a revoked
+    # one, and letting the request through would honour revoked sessions
+    # for the length of the outage. Reject with a documented 503 rather
+    # than let the RedisError surface as an unhandled 500.
+    try:
+        blocked = await is_any_blocked(jti, user_id, sid)
+    except RedisError as exc:
+        logger.warning("token_blocklist_check_failed", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication service temporarily unavailable",
+        ) from exc
+    if blocked:
         raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = await session.get(User, user_id)
