@@ -1,8 +1,11 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.blocklist import (
@@ -239,6 +242,30 @@ async def refresh(
     return response
 
 
+logger = structlog.get_logger()
+
+
+def _revocation_unavailable(event: str) -> JSONResponse:
+    """A clean 503 for a Redis failure while blocking a revoked token (#122).
+
+    Redis is the only home of the access-token blocklist, so when the
+    block can't be written the revoked token would stay usable until it
+    expires. Fail closed: tell the client the sign-out did not complete
+    so it retries. The database revoke that ran just before is
+    idempotent, so a retry is safe.
+
+    Returned rather than raised, on purpose: an HTTPException would run
+    get_db_session's rollback and undo the database revoke, while a
+    normal response lets it commit. Call from inside an `except
+    RedisError` block so the traceback is attached to the log.
+    """
+    logger.warning(event, exc_info=True)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Could not complete sign-out, please try again"},
+    )
+
+
 @router.post("/logout", status_code=204)
 async def logout(
     user: Annotated[User, Depends(get_current_user)],
@@ -269,7 +296,10 @@ async def logout(
     # for the rest of its natural lifetime -- logging out wouldn't
     # actually revoke the thing that grants access.
     if jti:
-        await block_token(jti)
+        try:
+            await block_token(jti)
+        except RedisError:
+            return _revocation_unavailable("logout_block_token_failed")
 
 
 @router.post("/logout-all", status_code=204)
@@ -284,9 +314,12 @@ async def logout_all(
     # just the one used to call this endpoint -- otherwise another
     # device's still-valid access token would keep working until it
     # naturally expires, even though its refresh token is now dead.
-    await block_all_user_tokens(str(user.id))
-    if jti:
-        await block_token(jti)
+    try:
+        await block_all_user_tokens(str(user.id))
+        if jti:
+            await block_token(jti)
+    except RedisError:
+        return _revocation_unavailable("logout_all_block_failed")
 
 
 @router.get("/me", response_model=UserResponse)
