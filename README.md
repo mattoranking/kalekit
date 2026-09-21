@@ -2,7 +2,7 @@
 
 A scaffolding kit that generates a full-stack monorepo in one command: a FastAPI backend with authentication, three Next.js web apps, an Expo mobile app, shared packages, Docker Compose and CI/CD.
 
-You choose one of three access-control styles. Kalekit copies the matching template, renames it to your project, installs dependencies and makes the first commit.
+It is built to be run by Claude Code as a skill: you name the project and pick an access-control style, and Claude generates it, starts it and helps if something breaks. You can also run the generator by hand.
 
 ## What you get
 
@@ -65,9 +65,37 @@ In `rbac` and `hybrid`, a Redis outage makes token checks fail closed with a 503
 | Docker with Compose | current |
 | [mkcert](https://github.com/FiloSottile/mkcert) | current |
 
-## Create a project
+Using Claude Code, you also need Claude Code itself. Claude checks the rest and tells you what is missing.
 
-The project name must match `^[a-z][a-z0-9]{1,29}$`: lowercase, starting with a letter, no `-` or `_`. It becomes the Python package, the pnpm scope, the database and container names and the environment variable prefix.
+## Create a project with Claude Code
+
+This is the recommended way. Claude asks what it needs, runs the generator, brings the stack up, checks it and helps when something goes wrong.
+
+**1. Install Kalekit as a skill.** The repository is the skill, so clone it into your skills folder:
+
+```bash
+git clone https://github.com/mattoranking/kalekit.git ~/.claude/skills/fullstack-monorepo
+```
+
+**2. Ask Claude to create the project.** Start Claude Code in the folder where the project should live and say what you want, for example:
+
+> Create a new project called `acme` with hybrid auth.
+
+Or run `/fullstack-monorepo`. If you leave out the name or the auth style, Claude asks. The name must match `^[a-z][a-z0-9]{1,29}$`: lowercase, starting with a letter, no `-` or `_`. If yours doesn't, Claude proposes a valid one, such as `myapp` for `my-app`. Not sure which style to pick? Use the table above.
+
+**3. Let Claude work through the setup.** It will:
+
+1. Check that the prerequisites are installed and tell you what is missing.
+2. Run the generator, which installs dependencies and makes the first commit.
+3. Ask you to run `make setup`, because it writes `/etc/hosts` and needs your sudo password. In Claude Code, type `! make setup` to run it in the session.
+4. Start the stack with Docker Compose and generate and apply the initial database migration.
+5. Check the health endpoint and the web apps, then report the URLs.
+
+**4. If something fails, tell Claude.** A common case is ports 80 or 443 already in use by a system nginx. Claude reads the error, explains it and proposes a fix: stop the service or remap Traefik's ports in `compose.yml`.
+
+## Create a project without Claude
+
+Run the generator yourself. The project name follows the same rule as above, and the script does not start any services.
 
 ```bash
 git clone https://github.com/mattoranking/kalekit.git
@@ -75,13 +103,13 @@ cd kalekit
 bash scripts/generate.sh --auth <rbac|abac|hybrid> <name> [target-dir]
 ```
 
-`target-dir` defaults to `./<name>`. The script does not start any services.
+`target-dir` defaults to `./<name>`. For example, a multi-tenant project named `acme` in `~/code/acme`:
 
-Kalekit is also packaged as a Claude Code skill (`fullstack-monorepo`, described in [`SKILL.md`](SKILL.md)). Placed at `~/.claude/skills/fullstack-monorepo`, it asks for a name and an auth style and runs the same script.
+```bash
+bash scripts/generate.sh --auth hybrid acme ~/code/acme
+```
 
-## Run it locally
-
-From the generated project:
+Then start it from the generated project:
 
 ```bash
 make setup                      # writes /etc/hosts entries and mkcert certificates (needs sudo)
