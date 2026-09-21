@@ -13,9 +13,9 @@ See [`CLAUDE.md`](CLAUDE.md) for architecture and the load-bearing rules.
 kalekit/
 ├── apps/
 │   ├── backend/        # FastAPI service (uv)
-│   ├── web/            # primary web app       — Next.js 15  (app.kalekit.dev)
-│   ├── site/           # marketing site        — Next.js 15  (kalekit.dev)
-│   ├── admin/          # admin / ops panel     — Next.js 15  (admin.kalekit.dev)
+│   ├── web/            # primary web app       — Next.js 16  (app.kalekit.dev)
+│   ├── site/           # marketing site        — Next.js 16  (kalekit.dev)
+│   ├── admin/          # admin / ops panel     — Next.js 16  (admin.kalekit.dev)
 │   └── mobile/         # mobile app            — Expo / React Native
 ├── packages/
 │   ├── config/         # shared tsconfig + Tailwind preset (design tokens)

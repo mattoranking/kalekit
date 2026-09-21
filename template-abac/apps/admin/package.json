@@ -6,23 +6,23 @@
     "dev": "next dev -p 3002",
     "build": "next build",
     "start": "next start -p 3002",
-    "lint": "next lint",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@kalekit/api-client": "workspace:*",
-    "next": "^15.2.3",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@kalekit/config": "workspace:*",
     "@types/node": "^22.10.5",
-    "@types/react": "^19.0.7",
-    "@types/react-dom": "^19.0.3",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "autoprefixer": "^10.4.20",
     "eslint": "^9.18.0",
-    "eslint-config-next": "^15.2.3",
+    "eslint-config-next": "^16.0.0",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.19",
     "typescript": "^5.9.3"
