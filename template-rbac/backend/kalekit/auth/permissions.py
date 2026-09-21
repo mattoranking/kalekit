@@ -26,22 +26,43 @@ async def get_permissions_for_roles(
     session: AsyncSession,
     roles: list[str],
 ) -> set[str]:
-    """Fetch permissions for a list of roles from Redis."""
-    r = await get_redis()
+    """Fetch permissions for a list of roles, Redis cache first.
+
+    Redis is only a performance cache; Postgres is the source of truth.
+    A Redis error on the read is treated as a cache miss, and one on the
+    write-back just skips caching, so an outage degrades to one DB query
+    per role (still correct) instead of a 500 (#98).
+    """
     permissions: set[str] = set()
     for role in roles:
-        cached = await r.get(f"role:{role}:permissions")
+        key = f"role:{role}:permissions"
+        cached = None
+        try:
+            r = await get_redis()
+            cached = await r.get(key)
+        except RedisError:
+            logger.warning(
+                "role_permission_cache_read_failed", role=role, exc_info=True
+            )
         if cached:
             permissions.update(json.loads(cached))
-        else:
-            # Cache miss - load from DB then cache
-            perms: set[str] = await _load_permissions_from_db(session, role)
+            continue
+        # Cache miss (or Redis unavailable) - load from DB then cache
+        perms: set[str] = await _load_permissions_from_db(session, role)
+        try:
+            r = await get_redis()
             await r.set(
-                f"role:{role}:permissions",
+                key,
                 json.dumps(list(perms)),
                 ex=settings.ROLE_CACHE_TTL_SECONDS,
             )
-            permissions.update(perms)
+        except RedisError:
+            # The check already succeeded via the DB; a failed cache
+            # write must not turn it into an error.
+            logger.warning(
+                "role_permission_cache_write_failed", role=role, exc_info=True
+            )
+        permissions.update(perms)
     return permissions
 
 
