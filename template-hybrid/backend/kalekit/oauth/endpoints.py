@@ -91,7 +91,8 @@ async def oauth_callback(
     """Handle the OAuth provider's redirect.
 
     1. Validate state against Redis (prevents CSRF)
-    2. Exchange the authorization code for an access token
+    2. Exchange the authorization code for a provider token (used in
+       memory to read the profile, never stored)
     3. Fetch the user's profile from the provider
     4. Find or create a local User + OAuthAccount link
     5. Return our own JWT pair
@@ -135,8 +136,6 @@ async def oauth_callback(
             status_code=502, detail="Provider did not return an access token"
         )
 
-    provider_refresh_token = token_response.get("refresh_token")
-
     # --- Fetch user profile ---
     try:
         user_info = await client.get_user_info(provider_access_token)
@@ -154,8 +153,6 @@ async def oauth_callback(
         platform=provider,
         account_id=account_id,
         account_email=account_email,
-        access_token=provider_access_token,
-        refresh_token=provider_refresh_token,
         display_name=display_name,
     )
 
