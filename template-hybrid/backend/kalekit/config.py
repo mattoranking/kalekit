@@ -89,6 +89,11 @@ class Settings(BaseSettings):
     # CORS
     CORS_ORIGINS: str = "http://localhost:3000"
 
+    # Host header allow-list (comma-separated; "*.example.com" wildcards
+    # allowed). Requests for any other Host get a 400. Set this to the
+    # API's public hostname wherever it is deployed.
+    ALLOWED_HOSTS: str = "localhost,127.0.0.1,testserver,test,api.kalekit.dev"
+
     # OAuth2 — GitHub
     GITHUB_CLIENT_ID: str = ""
     GITHUB_CLIENT_SECRET: str = ""

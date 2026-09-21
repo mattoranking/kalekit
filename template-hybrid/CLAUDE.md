@@ -120,6 +120,27 @@ instead of silently matching every tenant. Every org-scoped endpoint needs
 a cross-tenant denial test alongside it — member of org A calling org B's
 URL gets 404 and no rows — see `two_tenants` in `backend/tests/conftest.py`.
 
+## Security headers
+
+Each header is set in exactly one place, so layers cannot conflict.
+
+| Header | Set by |
+|---|---|
+| `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` | API: `backend/kalekit/security.py` |
+| `Cache-Control: no-store` on `/v1/auth/*` and `/v1/oauth/*` | API: `backend/kalekit/security.py` |
+| Host allow-list (`KALEKIT_ALLOWED_HOSTS`, 400 otherwise) | API: `TrustedHostMiddleware` |
+| `Strict-Transport-Security` | Traefik, HTTPS routers only (`traefik/dynamic.yml`, `hsts@file`; the deploy workflows' Traefik labels). Never the app: local development runs over HTTP |
+| the same three basic headers, plus `Content-Security-Policy-Report-Only` | each Next.js app's `next.config.mjs` `headers()` |
+| enforced `Content-Security-Policy: frame-ancestors 'none'` | `apps/admin` only |
+
+Set `KALEKIT_ALLOWED_HOSTS` to the API's public hostname wherever it is
+deployed (also add a LAN IP if a phone reaches the dev API directly).
+
+**CSRF: not applicable, do not re-check.** Authentication is a bearer token in
+the `Authorization` header. The API sets no cookies and reads none, so a
+cross-site request cannot carry credentials. If a client ever moves tokens into
+cookies, this stance ends and CSRF protection becomes required.
+
 ## The admin panel is the product
 
 For the first hundred records, a human does the matching and fixes the edge
