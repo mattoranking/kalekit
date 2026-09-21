@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     # token's `kid` header). New tokens are always signed with
     # JWT_SECRET_KEY under this kid.
     JWT_KID: str = "primary"
+    # Value of the `iss` claim stamped on every access token and required
+    # on decode, so a token minted by a different service or environment
+    # that happens to share a signing key (e.g. a staging copy with a
+    # copied secret) is rejected. Set it per deployment/environment.
+    JWT_ISSUER: str = "kalekit"
     # Previous signing keys, keyed by the `kid` they were issued under.
     # A token whose `kid` matches one of these still verifies, so a
     # secret can be rotated (bump JWT_KID, set a new JWT_SECRET_KEY, and

@@ -59,6 +59,7 @@ def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
         "type": "access",
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=15)).timestamp()),
         "aud": ClientType.web.value,
+        "iss": settings.JWT_ISSUER,
     }
     signing_input = (
         _b64url(json.dumps(header, separators=(",", ":")).encode())
@@ -79,6 +80,7 @@ def _make_token(
     kid: Any = settings.JWT_KID,
     algorithm: str = settings.JWT_ALGORITHM,
     aud: str | list[str] | None = ClientType.web.value,
+    iss: str | None = settings.JWT_ISSUER,
     exp_delta: timedelta = timedelta(minutes=15),
     token_type: str = "access",
 ) -> str:
@@ -91,6 +93,8 @@ def _make_token(
     }
     if aud is not None:
         payload["aud"] = aud
+    if iss is not None:
+        payload["iss"] = iss
     headers = {"kid": kid} if kid is not None else None
     return jwt.encode(payload, key, algorithm=algorithm, headers=headers)
 
@@ -129,6 +133,37 @@ def test_decode_rejects_token_missing_audience_claim() -> None:
     with pytest.raises(HTTPException) as exc_info:
         _decode_access_token(_credentials(token))
 
+    assert exc_info.value.status_code == 401
+
+
+def test_decode_rejects_token_missing_issuer_claim() -> None:
+    token = _make_token(iss=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid token"
+
+
+def test_decode_rejects_token_with_wrong_issuer() -> None:
+    token = _make_token(iss="some-other-deployment")
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid token"
+
+
+def test_decode_follows_configured_issuer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "JWT_ISSUER", "kalekit-staging")
+
+    ok = _make_token(iss="kalekit-staging")
+    assert _decode_access_token(_credentials(ok))["iss"] == "kalekit-staging"
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(_make_token(iss="kalekit")))
     assert exc_info.value.status_code == 401
 
 

@@ -99,6 +99,9 @@ def create_access_token(
         # (require_admin_client) reject a token minted for web/mobile
         # even when its baked-in scopes include admin permissions.
         "aud": client.value,
+        # Which deployment minted this token; _decode_access_token
+        # requires it to match JWT_ISSUER.
+        "iss": settings.JWT_ISSUER,
     }
     # `session_id` is the refresh token family this access token was
     # minted from (see kalekit.auth.repository.store_refresh_token /
