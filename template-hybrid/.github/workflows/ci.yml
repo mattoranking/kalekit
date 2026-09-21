@@ -88,6 +88,9 @@ jobs:
       - name: Typecheck
         run: pnpm --filter @kalekit/${{ matrix.app }} typecheck
 
+      - name: Test
+        run: pnpm --filter @kalekit/${{ matrix.app }} test
+
       - name: Build
         run: pnpm --filter @kalekit/${{ matrix.app }} build
 

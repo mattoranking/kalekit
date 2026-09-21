@@ -79,6 +79,13 @@ make fe-typecheck
 make api-client-gen   # regenerate @kalekit/api-client from the running backend
 ```
 
+## Security headers
+
+The API (`backend/kalekit/security.py`), Traefik (HSTS, HTTPS routers only) and
+each Next.js app (`next.config.mjs`) each own a distinct set of headers; the
+table in `CLAUDE.md` ("Security headers") lists exactly where each is set. Set
+`KALEKIT_ALLOWED_HOSTS` to the API's public hostname when you deploy.
+
 ## Deployment
 
 Backend deploys to DigitalOcean via `.github/workflows/deploy-*.yml`
