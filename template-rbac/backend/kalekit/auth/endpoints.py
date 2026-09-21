@@ -32,6 +32,7 @@ from kalekit.auth.repository import (
     get_active_refresh_token_by_family,
     get_family_owner,
     get_refresh_token_by_hash,
+    get_refresh_token_by_hash_for_update,
     get_refresh_token_by_id,
     get_valid_verification_token,
     invalidate_user_password_reset_tokens,
@@ -305,7 +306,13 @@ async def refresh(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     presented_hash = hash_refresh_token(body.refresh_token)
-    token_row = await get_refresh_token_by_hash(session, presented_hash)
+    # Row-locked: the lock is held until get_db_session commits, which
+    # serializes concurrent refreshes of the same token. That is also
+    # why the grace-pair cache write at the end of this function must
+    # stay inline (awaited before returning/commit), never deferred to
+    # BackgroundTasks: a blocked second request wakes the instant we
+    # commit and must already find the cached pair.
+    token_row = await get_refresh_token_by_hash_for_update(session, presented_hash)
 
     if token_row is None:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
@@ -437,6 +444,7 @@ async def refresh(
     await mark_refresh_token_replaced(session, token_row, new_token_row.id)
 
     response = TokenResponse(access_token=new_access, refresh_token=new_refresh)
+    # Must stay inline, before commit -- see the lock note at the top.
     await cache_refresh_grace_pair(
         presented_hash,
         response.model_dump(),
