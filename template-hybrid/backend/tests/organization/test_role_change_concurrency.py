@@ -69,7 +69,7 @@ async def committed_org_with_member_target(
     suffix = uuid.uuid4().hex[:8]
     async with AsyncSession(engine, expire_on_commit=False) as setup_session:
         owner = await create_user(
-            setup_session, f"race-owner3-{suffix}@example.com", "password123"
+            setup_session, f"race-owner3-{suffix}@example.com", "password12345"
         )
         organization = await create_organization(setup_session, name="Race Co 3")
         await add_member(
@@ -79,7 +79,7 @@ async def committed_org_with_member_target(
             role=MemberRole.owner,
         )
         target = await create_user(
-            setup_session, f"race-target3-{suffix}@example.com", "password123"
+            setup_session, f"race-target3-{suffix}@example.com", "password12345"
         )
         await add_member(
             setup_session,

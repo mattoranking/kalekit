@@ -7,6 +7,7 @@ from typing import Any
 import jwt
 from passlib.context import CryptContext
 
+from kalekit.auth.password_policy import password_too_long
 from kalekit.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -17,6 +18,11 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    # An oversized password can never match one that was accepted at
+    # registration, so reject it before bcrypt runs. Callers see the
+    # same False as for a wrong password, so login stays uniform.
+    if password_too_long(plain):
+        return False
     return pwd_context.verify(plain, hashed)
 
 

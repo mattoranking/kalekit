@@ -44,7 +44,7 @@ async def owner_and_org(engine: AsyncEngine) -> tuple[str, str]:
     async with AsyncSession(engine, expire_on_commit=False) as setup_session:
         organization = await create_organization(setup_session, name="Race Co")
         invitee = await create_user(
-            setup_session, "invitee-race@example.com", "password123"
+            setup_session, "invitee-race@example.com", "password12345"
         )
         await setup_session.commit()
         return str(organization.id), str(invitee.id)

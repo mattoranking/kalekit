@@ -8,11 +8,11 @@ async def _login_pair(client: AsyncClient, email: str) -> tuple[str, str]:
     """Register + login, returning (access_token, refresh_token)."""
     await client.post(
         "/v1/auth/register",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
     )
     response = await client.post(
         "/v1/auth/login",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -171,7 +171,7 @@ async def test_plain_logout_does_not_revoke_other_sessions(
     email = "multi-device@example.com"
     access_token_a, refresh_token_a = await _login_pair(client, email)
     login_b = await client.post(
-        "/v1/auth/login", json={"email": email, "password": "password123"}
+        "/v1/auth/login", json={"email": email, "password": "password12345"}
     )
     assert login_b.status_code == 200
     access_token_b = login_b.json()["access_token"]
@@ -229,7 +229,7 @@ async def test_logout_all_revokes_every_session(
     email = "logout-all@example.com"
     access_token_a, refresh_token_a = await _login_pair(client, email)
     login_b = await client.post(
-        "/v1/auth/login", json={"email": email, "password": "password123"}
+        "/v1/auth/login", json={"email": email, "password": "password12345"}
     )
     assert login_b.status_code == 200
     access_token_b = login_b.json()["access_token"]
@@ -286,7 +286,7 @@ async def test_expired_refresh_token_returns_401_without_revoking_family(
     )
     login_response = await client.post(
         "/v1/auth/login",
-        json={"email": "expired@example.com", "password": "password123"},
+        json={"email": "expired@example.com", "password": "password12345"},
     )
     assert login_response.status_code == 200
     expired_refresh_token = login_response.json()["refresh_token"]
