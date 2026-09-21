@@ -10,6 +10,6 @@ a laptop with a funda tab open. Revisit only on evidence of repeat booking.
 pnpm --filter @kalekit/web dev     # http://localhost:3000
 ```
 
-- Framework: Next.js 15 (App Router), React 19, Tailwind 3
+- Framework: Next.js 16 (App Router), React 19, Tailwind 3
 - Backend types: `@kalekit/api-client` (generated from OpenAPI)
 - Env: `NEXT_PUBLIC_API_URL` (default `http://localhost:8000`)
