@@ -5,7 +5,9 @@ from httpx import AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.config import Environment, settings
 from kalekit.models.organization import OrganizationMember
+from kalekit.models.organization_invitation import OrganizationInvitation
 from kalekit.oauth.repository import find_or_create_oauth_user
 from kalekit.organization.repository import add_member as add_member_repo
 from kalekit.organization.repository import create_invitation
@@ -153,6 +155,43 @@ async def test_inviting_creates_no_membership(
         .where(OrganizationMember.organization_id == uuid.UUID(org_a))
     )
     assert result.scalar_one() == 1  # only alice, the owner
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_inviting_with_no_email_provider_configured_fails_the_request(
+    client: AsyncClient,
+    session: AsyncSession,
+    register,
+    login,
+    auth_header,
+    org_id_for,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`get_email_sender` raises outside dev/test when no real provider
+    is configured. That must fail the invite request itself, not get
+    swallowed inside the `BackgroundTasks` callback that sends the
+    email -- which runs after the 202 is already on the wire, so the
+    caller would be told "invitation sent" for an email that never
+    goes out (issue #81)."""
+    monkeypatch.setattr(settings, "ENV", Environment.production)
+
+    await register("alice@example.com")
+    token_alice = await login("alice@example.com")
+    org_a = await org_id_for("alice@example.com")
+
+    with pytest.raises(RuntimeError):
+        await client.post(
+            f"/v1/organizations/{org_a}/invitations",
+            json={"email": "bob@example.com"},
+            headers=auth_header(token_alice),
+        )
+
+    # The failure happened before `create_invitation`, so no invitation
+    # row was left behind for an email that was never sent.
+    result = await session.execute(
+        select(func.count()).select_from(OrganizationInvitation)
+    )
+    assert result.scalar_one() == 0
 
 
 @pytest.mark.asyncio(loop_scope="session")
