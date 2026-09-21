@@ -74,14 +74,14 @@ This is the recommended way. Claude asks what it needs, runs the generator, brin
 **1. Install Kalekit as a skill.** The repository is the skill, so clone it into your skills folder:
 
 ```bash
-git clone https://github.com/mattoranking/kalekit.git ~/.claude/skills/fullstack-monorepo
+git clone https://github.com/mattoranking/kalekit.git ~/.claude/skills/kalekit
 ```
 
 **2. Ask Claude to create the project.** Start Claude Code in the folder where the project should live and say what you want, for example:
 
 > Create a new project called `acme` with hybrid auth.
 
-Or run `/fullstack-monorepo`. If you leave out the name or the auth style, Claude asks. The name must match `^[a-z][a-z0-9]{1,29}$`: lowercase, starting with a letter, no `-` or `_`. If yours doesn't, Claude proposes a valid one, such as `myapp` for `my-app`. Not sure which style to pick? Use the table above.
+Or run `/kalekit`. If you leave out the name or the auth style, Claude asks. The name must match `^[a-z][a-z0-9]{1,29}$`: lowercase, starting with a letter, no `-` or `_`. If yours doesn't, Claude proposes a valid one, such as `myapp` for `my-app`. Not sure which style to pick? Use the table above.
 
 **3. Let Claude work through the setup.** It will:
 

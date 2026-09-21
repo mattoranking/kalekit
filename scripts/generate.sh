@@ -124,7 +124,7 @@ echo "==> git init + first commit"
 git init -q
 git add -A
 git -c user.email=scaffold@local -c user.name=scaffold \
-    commit -qm "chore: initial scaffold from fullstack-monorepo skill (auth: $AUTH_STYLE)"
+    commit -qm "chore: initial scaffold from the Kalekit skill (auth: $AUTH_STYLE)"
 
 cat <<EOF
 
