@@ -253,13 +253,13 @@ async def test_register_is_rate_limited_per_ip(
 
     first = await client.post(
         "/v1/auth/register",
-        json={"email": "register-limit-a@example.com", "password": "password123"},
+        json={"email": "register-limit-a@example.com", "password": "password12345"},
     )
     assert first.status_code == 201
 
     second = await client.post(
         "/v1/auth/register",
-        json={"email": "register-limit-b@example.com", "password": "password123"},
+        json={"email": "register-limit-b@example.com", "password": "password12345"},
     )
     assert second.status_code == 429
     assert "Retry-After" in second.headers
@@ -346,7 +346,7 @@ async def test_forgot_password_is_rate_limited_per_account(
     monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_ACCOUNT", 1)
     monkeypatch.setattr(settings, "PASSWORD_RESET_REQUEST_RATE_LIMIT_PER_IP", 1000)
 
-    await register("forgot-rate-account@example.com", "password123")
+    await register("forgot-rate-account@example.com", "password12345")
 
     first = await client.post(
         "/v1/auth/password/forgot",

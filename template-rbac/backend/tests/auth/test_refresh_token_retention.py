@@ -22,7 +22,7 @@ NOW = datetime.now(timezone.utc)
 
 
 async def _make_user(session: AsyncSession, email: str) -> uuid.UUID:
-    user = await create_user(session, email, "password123", email_verified=True)
+    user = await create_user(session, email, "password12345", email_verified=True)
     return user.id
 
 

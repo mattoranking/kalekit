@@ -4,11 +4,12 @@ from datetime import datetime
 from pydantic import BaseModel, EmailStr
 
 from kalekit.auth.client_type import ClientType
+from kalekit.auth.password_policy import NewPassword
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: NewPassword
 
 
 class LoginRequest(BaseModel):
@@ -79,7 +80,7 @@ class SessionListResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str
-    new_password: str
+    new_password: NewPassword
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -93,7 +94,7 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str
-    new_password: str
+    new_password: NewPassword
 
 
 class ReauthenticateRequest(BaseModel):

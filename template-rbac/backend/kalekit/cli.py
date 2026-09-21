@@ -40,6 +40,7 @@ import structlog
 # Import the model package so every mapped class is registered before any
 # query runs -- mirrors what kalekit.main does implicitly at app startup.
 import kalekit.models  # noqa: F401
+from kalekit.auth.password_policy import validate_password_length
 from kalekit.auth.repository import (
     create_user,
     find_user_by_email,
@@ -71,6 +72,12 @@ async def create_admin(email: str, password: str | None) -> None:
                         file=sys.stderr,
                     )
                     raise SystemExit(1)
+
+                try:
+                    validate_password_length(password)
+                except ValueError as exc:
+                    print(str(exc), file=sys.stderr)
+                    raise SystemExit(1) from exc
 
                 user = await create_user(
                     session, email, password, email_verified=True

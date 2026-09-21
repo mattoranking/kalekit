@@ -12,7 +12,7 @@ async def test_logout_revokes_the_access_token_immediately(
     await promote_to_admin("admin@example.com")
     login_response = await client.post(
         "/v1/auth/login",
-        json={"email": "admin@example.com", "password": "password123"},
+        json={"email": "admin@example.com", "password": "password12345"},
     )
     assert login_response.status_code == 200
     token = login_response.json()["access_token"]
@@ -42,7 +42,7 @@ async def test_logout_requires_a_refresh_token(
     await register("no-body@example.com")
     login_response = await client.post(
         "/v1/auth/login",
-        json={"email": "no-body@example.com", "password": "password123"},
+        json={"email": "no-body@example.com", "password": "password12345"},
     )
     assert login_response.status_code == 200
     token = login_response.json()["access_token"]

@@ -69,7 +69,7 @@ async def test_login_and_refresh_are_no_store(
         "/v1/auth/login",
         json={
             "email": "headers@example.com",
-            "password": "password123",
+            "password": "password12345",
             "client": "web",
         },
     )

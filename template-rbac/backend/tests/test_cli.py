@@ -102,6 +102,18 @@ async def test_create_admin_without_password_for_unknown_email_exits(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_create_admin_rejects_a_password_outside_the_length_rule(
+    cli_email: Callable[[str], str],
+) -> None:
+    email = cli_email("cli-short-pw")
+
+    with pytest.raises(SystemExit):
+        await create_admin(email, "too-short")
+
+    assert await _fetch_role_names(email) is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_create_admin_promotes_an_existing_user(
     cli_email: Callable[[str], str],
 ) -> None:
@@ -110,7 +122,7 @@ async def test_create_admin_promotes_an_existing_user(
     engine = create_async_engine("kalekit")
     try:
         async with create_async_sessionmaker(engine)() as session:
-            await create_user(session, email, "password123", email_verified=False)
+            await create_user(session, email, "password12345", email_verified=False)
             await session.commit()
     finally:
         await engine.dispose()
@@ -126,7 +138,7 @@ async def test_create_admin_promotes_an_existing_user(
 async def test_create_admin_is_idempotent(cli_email: Callable[[str], str]) -> None:
     email = cli_email("cli-idempotent")
 
-    await create_admin(email, "password123")
+    await create_admin(email, "password12345")
     # Promoting an already-admin user again must not try to insert a
     # duplicate UserRole row (user_id, role_id) and blow up.
     await create_admin(email, None)
@@ -233,7 +245,7 @@ async def test_prune_refresh_tokens_cli_deletes_old_dead_rows_and_reports_count(
     try:
         async with create_async_sessionmaker(engine)() as session:
             user = await create_user(
-                session, email, "password123", email_verified=True
+                session, email, "password12345", email_verified=True
             )
             now = datetime.now(timezone.utc)
             token = await store_refresh_token(

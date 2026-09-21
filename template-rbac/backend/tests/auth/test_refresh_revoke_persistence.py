@@ -76,10 +76,10 @@ async def _cleanup(engine: AsyncEngine, email: str) -> None:
 
 async def _login(client: AsyncClient, email: str) -> str:
     await client.post(
-        "/v1/auth/register", json={"email": email, "password": "password123"}
+        "/v1/auth/register", json={"email": email, "password": "password12345"}
     )
     r = await client.post(
-        "/v1/auth/login", json={"email": email, "password": "password123"}
+        "/v1/auth/login", json={"email": email, "password": "password12345"}
     )
     assert r.status_code == 200, r.text
     return r.json()["refresh_token"]
