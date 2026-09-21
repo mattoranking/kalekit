@@ -1,3 +1,4 @@
+import jwt
 import pytest
 from httpx import AsyncClient
 
@@ -201,3 +202,24 @@ async def test_refresh_for_deactivated_user_returns_401(
     response = await _refresh(client, refresh_token)
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_refreshed_access_token_carries_issuer_and_is_accepted(
+    client: AsyncClient,
+) -> None:
+    """The access token minted by /auth/refresh carries `iss` and still
+    authenticates -- refreshing is how clients recover once tokens
+    minted before `iss` was required are rejected."""
+    _, refresh_token = await _login_pair(client, "issuer-refresh@example.com")
+
+    response = await _refresh(client, refresh_token)
+
+    assert response.status_code == 200
+    access_token = response.json()["access_token"]
+    claims = jwt.decode(access_token, options={"verify_signature": False})
+    assert claims["iss"] == settings.JWT_ISSUER
+    check = await client.get(
+        "/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
+    )
+    assert check.status_code == 200

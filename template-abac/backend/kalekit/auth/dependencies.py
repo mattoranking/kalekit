@@ -55,8 +55,9 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
             # "alg: none" / algorithm-confusion JWT attacks.
             algorithms=[settings.JWT_ALGORITHM],
             audience=settings.JWT_AUDIENCE,
+            issuer=settings.JWT_ISSUER,
             leeway=settings.JWT_LEEWAY_SECONDS,
-            options={"require": ["exp", "aud"]},
+            options={"require": ["exp", "aud", "iss"]},
         )
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")

@@ -41,6 +41,9 @@ def create_access_token(user_id: str) -> str:
         "type": "access",
         "exp": expire,
         "aud": settings.JWT_AUDIENCE,
+        # Which deployment minted this token; _decode_access_token
+        # requires it to match JWT_ISSUER.
+        "iss": settings.JWT_ISSUER,
     }
     return jwt.encode(
         payload,
