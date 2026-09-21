@@ -13,9 +13,9 @@ async def test_login_succeeds_with_correct_password(
     register: Callable[..., Coroutine[None, None, Response]],
     login: Callable[..., Coroutine[None, None, str]],
 ) -> None:
-    await register("alice@example.com", password="password123")
+    await register("alice@example.com", password="password12345")
 
-    token = await login("alice@example.com", password="password123")
+    token = await login("alice@example.com", password="password12345")
 
     assert token
 
@@ -25,7 +25,7 @@ async def test_login_rejects_wrong_password(
     register: Callable[..., Coroutine[None, None, Response]],
     client: AsyncClient,
 ) -> None:
-    await register("bob@example.com", password="password123")
+    await register("bob@example.com", password="password12345")
 
     response = await client.post(
         "/v1/auth/login",
@@ -39,7 +39,7 @@ async def test_login_rejects_wrong_password(
 async def test_login_rejects_unknown_email(client: AsyncClient) -> None:
     response = await client.post(
         "/v1/auth/login",
-        json={"email": "nobody@example.com", "password": "password123"},
+        json={"email": "nobody@example.com", "password": "password12345"},
     )
 
     assert response.status_code == 401

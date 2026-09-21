@@ -102,14 +102,14 @@ async def client(
 async def register(
     client: AsyncClient,
 ) -> Callable[..., Coroutine[None, None, Response]]:
-    """register(email, password="password123", **extra) -> the raw response.
+    """register(email, password="password12345", **extra) -> the raw response.
 
     Left as a raw response (not asserted) so tests can check status codes
     that aren't 201 too, e.g. a duplicate-email 409.
     """
 
     async def _register(
-        email: str, password: str = "password123", **extra: object
+        email: str, password: str = "password12345", **extra: object
     ) -> Response:
         return await client.post(
             "/v1/auth/register",
@@ -121,9 +121,9 @@ async def register(
 
 @pytest_asyncio.fixture(loop_scope="session")
 async def login(client: AsyncClient) -> Callable[..., Coroutine[None, None, str]]:
-    """login(email, password="password123") -> access token. Asserts success."""
+    """login(email, password="password12345") -> access token. Asserts success."""
 
-    async def _login(email: str, password: str = "password123") -> str:
+    async def _login(email: str, password: str = "password12345") -> str:
         response = await client.post(
             "/v1/auth/login", json={"email": email, "password": password}
         )

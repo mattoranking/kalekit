@@ -8,11 +8,11 @@ async def _login_pair(client: AsyncClient, email: str) -> tuple[str, str]:
     """Register + login, returning (access_token, refresh_token)."""
     await client.post(
         "/v1/auth/register",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
     )
     response = await client.post(
         "/v1/auth/login",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -124,15 +124,15 @@ async def test_two_sessions_are_independent(client: AsyncClient) -> None:
     device/tab's session on every refresh."""
     await client.post(
         "/v1/auth/register",
-        json={"email": "two-sessions@example.com", "password": "password123"},
+        json={"email": "two-sessions@example.com", "password": "password12345"},
     )
     login_a = await client.post(
         "/v1/auth/login",
-        json={"email": "two-sessions@example.com", "password": "password123"},
+        json={"email": "two-sessions@example.com", "password": "password12345"},
     )
     login_b = await client.post(
         "/v1/auth/login",
-        json={"email": "two-sessions@example.com", "password": "password123"},
+        json={"email": "two-sessions@example.com", "password": "password12345"},
     )
     assert login_a.status_code == 200
     assert login_b.status_code == 200
