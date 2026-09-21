@@ -236,7 +236,7 @@ async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
         # Corrupt cached value: treat as a miss. The caller already
         # fails closed with a 401 on None, which is the right outcome
         # for an ambiguous (not confirmed-reuse) case.
-        logger.warning("refresh_grace_cache_value_corrupt")
+        logger.warning("refresh_grace_cache_value_corrupt", exc_info=True)
         return None
     if (
         not isinstance(decoded, dict)
