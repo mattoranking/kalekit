@@ -36,6 +36,24 @@ If a user with that email already exists, `--password` is ignored and
 they're promoted in place; otherwise it's required and a new, pre-verified
 admin user is created directly.
 
+## Password length
+
+Passwords are checked by length only (no composition rules, per NIST SP
+800-63B), counted in characters. Two settings control it:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `KALEKIT_PASSWORD_MIN_LENGTH` | `12` | Shortest password accepted when one is set |
+| `KALEKIT_PASSWORD_MAX_LENGTH` | `128` | Longest password accepted anywhere |
+
+Register, change-password and reset-password return `422` when the new
+password is outside the range (the `create-admin` command applies the
+same rule). Login enforces only the maximum: an oversized password gets
+the same `401 Invalid credentials` as a wrong one, without running the
+hash, and existing accounts with shorter passwords can still sign in and
+change them. The rule lives in `kalekit/auth/password_policy.py`; new
+endpoints that set a password should use its `NewPassword` type.
+
 ## Refresh token retention
 
 Every refresh, and every login/OAuth exchange, inserts a new `refresh_tokens`

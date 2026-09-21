@@ -33,7 +33,7 @@ def _access_token_with_bad_sid(user_id: str) -> str:
 
 
 async def _login_pair(
-    client: AsyncClient, email: str, password: str = "password123"
+    client: AsyncClient, email: str, password: str = "password12345"
 ) -> tuple[str, str]:
     """Register + login, returning (access_token, refresh_token)."""
     await client.post(
@@ -77,12 +77,12 @@ async def test_change_password_allows_login_with_the_new_password(
     response = await client.post(
         "/v1/auth/change-password",
         headers=_auth(access_token),
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
     assert response.status_code == 200
 
     old_password_login = await client.post(
-        "/v1/auth/login", json={"email": email, "password": "password123"}
+        "/v1/auth/login", json={"email": email, "password": "password12345"}
     )
     assert old_password_login.status_code == 401
 
@@ -103,7 +103,7 @@ async def test_change_password_revokes_other_sessions_but_keeps_the_current_one(
     response = await client.post(
         "/v1/auth/change-password",
         headers=_auth(current_access),
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
     assert response.status_code == 200
 
@@ -132,7 +132,7 @@ async def test_change_password_revokes_other_sessions_but_keeps_the_current_one(
 async def test_change_password_requires_authentication(client: AsyncClient) -> None:
     response = await client.post(
         "/v1/auth/change-password",
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
     assert response.status_code in (401, 403)
 
@@ -161,7 +161,7 @@ async def test_change_password_without_a_session_id_requires_reauth_not_500(
     response = await client.post(
         "/v1/auth/change-password",
         headers=_auth(sidless_token),
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "reauth_required"
@@ -185,7 +185,7 @@ async def test_change_password_with_a_malformed_sid_fails_closed_not_500(
     response = await client.post(
         "/v1/auth/change-password",
         headers=_auth(bad_sid_token),
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "reauth_required"

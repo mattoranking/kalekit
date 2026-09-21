@@ -23,7 +23,7 @@ from kalekit.oauth.client import OAUTH_PROVIDERS
 
 
 async def _login_pair(
-    client: AsyncClient, email: str, password: str = "password123"
+    client: AsyncClient, email: str, password: str = "password12345"
 ) -> tuple[str, str]:
     """Register + login, returning (access_token, refresh_token)."""
     await client.post(
@@ -69,7 +69,7 @@ async def test_change_password_succeeds_within_the_reauth_window(
     response = await client.post(
         "/v1/auth/change-password",
         headers=_auth(access_token),
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
 
     assert response.status_code == 200
@@ -86,7 +86,7 @@ async def test_change_password_fails_with_reauth_required_once_stale(
     response = await client.post(
         "/v1/auth/change-password",
         headers=_auth(access_token),
-        json={"current_password": "password123", "new_password": "newpassword456"},
+        json={"current_password": "password12345", "new_password": "newpassword456"},
     )
 
     assert response.status_code == 403
@@ -139,14 +139,14 @@ async def test_reauthenticate_restores_access_to_gated_action(
     stale = await client.post(
         "/v1/auth/change-password",
         headers=_auth(access_token),
-        json={"current_password": "password123", "new_password": "irrelevant1"},
+        json={"current_password": "password12345", "new_password": "irrelevant-1234"},
     )
     assert stale.status_code == 403
 
     reauth = await client.post(
         "/v1/auth/reauthenticate",
         headers=_auth(access_token),
-        json={"password": "password123"},
+        json={"password": "password12345"},
     )
     assert reauth.status_code == 200
 
@@ -155,7 +155,7 @@ async def test_reauthenticate_restores_access_to_gated_action(
     fresh = await client.post(
         "/v1/auth/change-password",
         headers=_auth(access_token),
-        json={"current_password": "password123", "new_password": "newpassword789"},
+        json={"current_password": "password12345", "new_password": "newpassword789"},
     )
     assert fresh.status_code == 200, fresh.text
 
@@ -408,7 +408,7 @@ async def test_repeated_failed_reauth_attempts_are_rate_limited(
     still_blocked = await client.post(
         "/v1/auth/reauthenticate",
         headers=_auth(access_token),
-        json={"password": "password123"},
+        json={"password": "password12345"},
     )
     assert still_blocked.status_code == 429
 
@@ -435,7 +435,7 @@ async def test_a_successful_reauth_clears_the_account_failure_count(
     success = await client.post(
         "/v1/auth/reauthenticate",
         headers=_auth(access_token),
-        json={"password": "password123"},
+        json={"password": "password12345"},
     )
     assert success.status_code == 200
 

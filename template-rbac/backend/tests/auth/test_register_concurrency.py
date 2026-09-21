@@ -14,7 +14,7 @@ from kalekit.models.user import User
 
 
 async def _register_with_own_session(
-    engine: AsyncEngine, email: str, password: str = "password123"
+    engine: AsyncEngine, email: str, password: str = "password12345"
 ) -> Response:
     """Issue one /auth/register call over its own dedicated AsyncSession
     (its own DB connection) and its own FastAPI app instance, mirroring

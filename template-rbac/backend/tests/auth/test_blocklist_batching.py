@@ -144,7 +144,7 @@ async def test_get_current_user_hits_redis_once_for_a_valid_token(
     await promote_to_admin("batching@example.com")
     login_response = await client.post(
         "/v1/auth/login",
-        json={"email": "batching@example.com", "password": "password123"},
+        json={"email": "batching@example.com", "password": "password12345"},
     )
     assert login_response.status_code == 200
     token = login_response.json()["access_token"]

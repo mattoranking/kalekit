@@ -55,7 +55,7 @@ async def test_oauth_does_not_link_when_provider_email_is_unverified(
     itself won't vouch for the email (e.g. an unconfirmed address at
     the provider)."""
     await create_user(
-        session, "verified-owner@example.com", "password123", email_verified=True
+        session, "verified-owner@example.com", "password12345", email_verified=True
     )
 
     with pytest.raises(OAuthAccountLinkingError):
@@ -75,7 +75,7 @@ async def test_oauth_links_when_both_sides_are_verified(
     """The legitimate case: the local account is verified and the
     provider vouches for the email too -- linking should succeed."""
     local_user = await create_user(
-        session, "legit@example.com", "password123", email_verified=True
+        session, "legit@example.com", "password12345", email_verified=True
     )
 
     linked_user = await find_or_create_oauth_user(

@@ -22,11 +22,11 @@ async def _login_pair(
     (access_token, refresh_token)."""
     await client.post(
         "/v1/auth/register",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
     )
     response = await client.post(
         "/v1/auth/login",
-        json={"email": email, "password": "password123", "client": client_type},
+        json={"email": email, "password": "password12345", "client": client_type},
     )
     assert response.status_code == 200, response.text
     body = response.json()

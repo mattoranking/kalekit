@@ -95,7 +95,7 @@ async def committed_refresh_token(engine: AsyncEngine) -> AsyncGenerator[str]:
     suffix = uuid.uuid4().hex[:8]
     async with AsyncSession(engine, expire_on_commit=False) as setup_session:
         user = await create_user(
-            setup_session, f"refresh-race-{suffix}@example.com", "password123"
+            setup_session, f"refresh-race-{suffix}@example.com", "password12345"
         )
         refresh_token, expires_at = generate_refresh_token()
         await store_refresh_token(

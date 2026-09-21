@@ -15,12 +15,12 @@ async def _login_pair(
     """Register + login, returning (access_token, refresh_token)."""
     await client.post(
         "/v1/auth/register",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
     )
     headers = {"User-Agent": user_agent} if user_agent else {}
     response = await client.post(
         "/v1/auth/login",
-        json={"email": email, "password": "password123"},
+        json={"email": email, "password": "password12345"},
         headers=headers,
     )
     assert response.status_code == 200, response.text

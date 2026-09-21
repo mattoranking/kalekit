@@ -9,6 +9,7 @@ from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
 
 from kalekit.auth.client_type import ClientType
+from kalekit.auth.password_policy import password_too_long
 from kalekit.config import settings
 
 # Argon2 is the scheme for every password hash (per current FastAPI docs).
@@ -35,6 +36,11 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
+    # An oversized password can never match one that was accepted at
+    # registration, so reject it before Argon2 runs. Callers see the
+    # same False as for a wrong password, so login stays uniform.
+    if password_too_long(plain):
+        return False
     return password_hash.verify(plain, hashed)
 
 

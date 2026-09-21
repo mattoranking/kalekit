@@ -127,6 +127,13 @@ class Settings(BaseSettings):
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Password length rule (see auth/password_policy.py): enforced when a
+    # password is set (register, change, reset); only the maximum is
+    # enforced at login. Counted in characters. Length is the whole
+    # rule -- no composition requirements (NIST SP 800-63B).
+    PASSWORD_MIN_LENGTH: int = Field(default=12, ge=1)
+    PASSWORD_MAX_LENGTH: int = Field(default=128, ge=1)
+
     # Password reset (#17). Deliberately much shorter-lived than an
     # email-verification token -- this one authorizes an account
     # takeover if intercepted, not just an email-ownership proof. Kept
@@ -396,6 +403,15 @@ class Settings(BaseSettings):
 
     def is_production(self) -> bool:
         return self.is_environment({Environment.production})
+
+    @model_validator(mode="after")
+    def _validate_password_length_bounds(self) -> "Settings":
+        if self.PASSWORD_MIN_LENGTH > self.PASSWORD_MAX_LENGTH:
+            raise ValueError(
+                "KALEKIT_PASSWORD_MIN_LENGTH must not exceed "
+                "KALEKIT_PASSWORD_MAX_LENGTH"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_jwt_secret_key(self) -> "Settings":
