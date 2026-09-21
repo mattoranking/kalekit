@@ -23,6 +23,7 @@ def _access_token_with_bad_sid(user_id: str) -> str:
         "sid": "not-a-uuid",
         "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
         "aud": "web",
+        "iss": settings.JWT_ISSUER,
     }
     return jwt.encode(
         payload,

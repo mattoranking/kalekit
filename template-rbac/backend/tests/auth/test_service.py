@@ -51,6 +51,19 @@ def test_create_access_token_carries_kid_header() -> None:
     assert header["kid"] == settings.JWT_KID
 
 
+def test_create_access_token_carries_configured_issuer() -> None:
+    token = create_access_token("user-1", ["read"])
+
+    payload = jwt.decode(
+        token,
+        settings.JWT_SECRET_KEY,
+        algorithms=[settings.JWT_ALGORITHM],
+        audience=ClientType.web.value,
+    )
+
+    assert payload["iss"] == settings.JWT_ISSUER
+
+
 def test_create_access_token_defaults_to_web_audience() -> None:
     """No explicit client -- defaults to the web client, matching
     LoginRequest.client's default."""
