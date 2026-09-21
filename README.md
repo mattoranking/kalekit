@@ -10,9 +10,9 @@ It is built to be run by Claude Code as a skill: you name the project and pick a
 <name>/
 ├── backend/          FastAPI, SQLAlchemy 2 (async), Alembic, pytest, uv
 ├── apps/
-│   ├── web/          Next.js 15, main app
-│   ├── site/         Next.js 15, marketing site
-│   ├── admin/        Next.js 15, ops panel
+│   ├── web/          Next.js 16, main app
+│   ├── site/         Next.js 16, marketing site
+│   ├── admin/        Next.js 16, ops panel
 │   └── mobile/       Expo, expo-router, EAS profiles
 ├── packages/
 │   ├── config/       shared tsconfig and Tailwind preset
