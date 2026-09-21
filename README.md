@@ -41,7 +41,7 @@ The three templates share the same base and differ in how far the auth work has 
 | Feature | `rbac` | `abac` | `hybrid` |
 |---|---|---|---|
 | Register, login, refresh, logout, `/me` | yes | yes | yes |
-| Password hashing | Argon2 (legacy bcrypt upgraded on login) | bcrypt | bcrypt |
+| Password hashing | Argon2 | bcrypt | bcrypt |
 | Refresh tokens stored hashed and rotated on use | yes | yes | yes |
 | Logout everywhere | yes | no | yes |
 | Redis blocklist for revoked access tokens | yes | no | yes |

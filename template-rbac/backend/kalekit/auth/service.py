@@ -7,17 +7,12 @@ from typing import Any
 import jwt
 from pwdlib import PasswordHash
 from pwdlib.hashers.argon2 import Argon2Hasher
-from pwdlib.hashers.bcrypt import BcryptHasher
 
 from kalekit.auth.client_type import ClientType
 from kalekit.config import settings
 
-# Argon2 is the preferred scheme for new hashes (per current FastAPI
-# docs); bcrypt is kept as a second, verify-only hasher purely so
-# accounts created before this migration -- whose password_hash is
-# still a bcrypt hash -- keep working. See verify_and_upgrade_password
-# for how those get transparently moved onto Argon2 on next login.
-password_hash = PasswordHash([Argon2Hasher(), BcryptHasher()])
+# Argon2 is the scheme for every password hash (per current FastAPI docs).
+password_hash = PasswordHash([Argon2Hasher()])
 
 # A precomputed hash with no corresponding user, used to keep the login
 # timing profile identical whether or not the submitted email exists.
@@ -25,22 +20,10 @@ password_hash = PasswordHash([Argon2Hasher(), BcryptHasher()])
 # the (comparatively slow) hash verification entirely, letting an attacker
 # distinguish "no such account" from "wrong password" by response time.
 #
-# This must stay an Argon2 hash (the same scheme `hash_password` now
-# produces for every new/upgraded account) rather than the bcrypt hash
-# used before this migration -- verifying against a different algorithm
-# than the common case would reintroduce a timing side-channel of its
-# own (unknown-email requests bcrypt-timed vs. real-account requests
-# Argon2-timed) if the two algorithms' wall-clock cost differs.
-# Hardcoded rather than computed at import time to avoid adding
-# startup-time variance.
-#
-# Note this doesn't make login fully constant-time during the
-# migration window itself: an existing account whose hash hasn't yet
-# been upgraded (see verify_and_upgrade_password) is still verified
-# against bcrypt, not Argon2, until its next successful login. That's
-# an inherent, unavoidable side effect of migrating hash algorithms in
-# place, not something a single dummy-hash choice can fix -- matching
-# the new default here is still the right call for the steady state.
+# It must be an Argon2 hash, the same scheme `hash_password` produces for
+# every account, so an unknown-email request and a wrong-password request
+# take the same time. Hardcoded rather than computed at import time to
+# avoid adding startup-time variance.
 DUMMY_PASSWORD_HASH = (
     "$argon2id$v=19$m=65536,t=3,p=4"
     "$trD9/9MVHdqUHmI1ujzBGQ$sYhVtOBGIDR2cGcALLbDhC/z7xMEdMVZh6Ui8NNDJzY"
@@ -52,18 +35,7 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    valid, _ = password_hash.verify_and_update(plain, hashed)
-    return valid
-
-
-def verify_and_upgrade_password(plain: str, hashed: str) -> tuple[bool, str | None]:
-    """Verify `plain` against `hashed`, same as verify_password, but also
-    return a re-hash under the current preferred scheme (Argon2) when
-    `hashed` used an older/non-preferred scheme -- e.g. a bcrypt hash
-    from before this migration. The caller (login) should persist the
-    returned hash when it isn't None, so legacy accounts are upgraded
-    transparently instead of needing a password reset."""
-    return password_hash.verify_and_update(plain, hashed)
+    return password_hash.verify(plain, hashed)
 
 
 def generate_verification_token() -> str:
