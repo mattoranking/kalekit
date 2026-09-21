@@ -1,9 +1,13 @@
 import json
 
 import redis.asyncio as redis
+import structlog
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.config import settings
+
+logger = structlog.get_logger()
 
 _redis: redis.Redis | None = None
 
@@ -201,20 +205,49 @@ async def cache_refresh_grace_pair(
         # A zero/negative grace period means the feature is effectively
         # disabled -- nothing to cache.
         return
-    r = await get_redis()
-    await r.set(
-        f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
-        json.dumps(payload),
-        ex=ttl_seconds,
-    )
+    try:
+        r = await get_redis()
+        await r.set(
+            f"{_REFRESH_GRACE_PREFIX}{old_token_hash}",
+            json.dumps(payload),
+            ex=ttl_seconds,
+        )
+    except RedisError:
+        # Best-effort only: this cache just smooths over a *second*,
+        # concurrent legitimate refresh of the same about-to-be-rotated
+        # token (see refresh() in kalekit.auth.endpoints). A Redis
+        # outage must not turn an otherwise-successful refresh into a
+        # 500; this one rotation simply loses grace-window leniency.
+        logger.warning("refresh_grace_cache_write_failed", exc_info=True)
 
 
 async def get_cached_refresh_grace_pair(old_token_hash: str) -> dict | None:
-    r = await get_redis()
-    cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    try:
+        r = await get_redis()
+        cached = await r.get(f"{_REFRESH_GRACE_PREFIX}{old_token_hash}")
+    except RedisError:
+        logger.warning("refresh_grace_cache_read_failed", exc_info=True)
+        return None
     if cached is None:
         return None
-    return json.loads(cached)
+    try:
+        decoded = json.loads(cached)
+    except (TypeError, ValueError):
+        # Corrupt cached value: treat as a miss. The caller already
+        # fails closed with a 401 on None, which is the right outcome
+        # for an ambiguous (not confirmed-reuse) case.
+        logger.warning("refresh_grace_cache_value_corrupt")
+        return None
+    if (
+        not isinstance(decoded, dict)
+        or not isinstance(decoded.get("access_token"), str)
+        or not isinstance(decoded.get("refresh_token"), str)
+    ):
+        # Valid JSON but not the TokenResponse shape; the caller does
+        # TokenResponse(**cached), which would raise (-> 500).
+        logger.warning("refresh_grace_cache_value_malformed")
+        return None
+    return decoded
 
 
 # ---------------------------------------------------------------------------
