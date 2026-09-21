@@ -135,9 +135,7 @@ async def oauth_callback(
             status_code=502, detail="Provider did not return an access token"
         )
 
-    provider_refresh_token = token_response.get("refresh_token")
-
-    # --- Fetch user profile ---
+    # --- Fetch user profile (the provider token is used here, in memory only) ---
     try:
         user_info = await client.get_user_info(provider_access_token)
     except Exception:
@@ -154,8 +152,6 @@ async def oauth_callback(
         platform=provider,
         account_id=account_id,
         account_email=account_email,
-        access_token=provider_access_token,
-        refresh_token=provider_refresh_token,
         display_name=display_name,
     )
 
