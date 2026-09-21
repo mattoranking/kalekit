@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # being replayed against an API that happens to trust the same
     # signing key for something else.
     JWT_AUDIENCE: str = "kalekit-api"
+    # Value of the `iss` claim stamped on every access token and required
+    # on decode, so a token minted by a different service or environment
+    # that happens to share a signing key (e.g. a staging copy with a
+    # copied secret) is rejected. Set it per deployment/environment.
+    JWT_ISSUER: str = "kalekit"
     # Clock-skew tolerance (seconds) applied when checking `exp` during
     # decode, so a slightly-behind server clock doesn't reject
     # otherwise-valid tokens right at their expiry boundary.
