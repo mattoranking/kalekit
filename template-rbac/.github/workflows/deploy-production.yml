@@ -192,6 +192,7 @@ jobs:
                   KALEKIT_POSTGRES_PORT: 5432
                   KALEKIT_POSTGRES_DATABASE: kalekit_prod
                   KALEKIT_CORS_ORIGINS: ${CORS_ORIGINS}
+                  KALEKIT_ALLOWED_HOSTS: ${API_DOMAIN},localhost,127.0.0.1
                   GEMINI_API_KEY: ${GEMINI_API_KEY}
                 expose:
                   - "8000"
@@ -211,10 +212,7 @@ jobs:
                   - "traefik.http.middlewares.prod-backend-headers.headers.stsSeconds=63072000"
                   - "traefik.http.middlewares.prod-backend-headers.headers.stsIncludeSubdomains=true"
                   - "traefik.http.middlewares.prod-backend-headers.headers.stsPreload=true"
-                  - "traefik.http.middlewares.prod-backend-headers.headers.frameDeny=true"
-                  - "traefik.http.middlewares.prod-backend-headers.headers.contentTypeNosniff=true"
                   - "traefik.http.middlewares.prod-backend-headers.headers.browserXssFilter=true"
-                  - "traefik.http.middlewares.prod-backend-headers.headers.referrerPolicy=strict-origin-when-cross-origin"
                   - "traefik.http.middlewares.prod-backend-headers.headers.permissionsPolicy=camera=(), microphone=(), geolocation=()"
                   - "traefik.http.middlewares.prod-backend-ratelimit.ratelimit.average=100"
                   - "traefik.http.middlewares.prod-backend-ratelimit.ratelimit.burst=50"
