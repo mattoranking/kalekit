@@ -44,7 +44,7 @@ from kalekit.organization.service import (
 )
 from kalekit.postgres import get_db_session
 from kalekit.redis import get_redis
-from kalekit.utils.email import send_invitation_email
+from kalekit.utils.email import get_email_sender, send_invitation_email
 from kalekit.utils.rate_limit import check_and_increment
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
@@ -205,6 +205,18 @@ async def create_organization_invitation(
     the invitee accepts while authenticated as the matching email, via
     `POST /invitations/accept`.
     """
+    # Called here, synchronously, purely to surface a misconfigured
+    # deployment as a request-time failure -- `get_email_sender` raises
+    # outside dev/test when no real provider is wired up. Left to raise
+    # only from inside the `BackgroundTasks` callback below (which runs
+    # after this response has already been sent), the caller would see
+    # a normal 202 "invitation sent" while the email silently never
+    # goes out, which defeats the whole point of that function failing
+    # loudly. `send_invitation_email` still calls it again itself when
+    # the background task actually runs; that's harmless and not worth
+    # a shared-instance refactor to avoid.
+    get_email_sender()
+
     r = await get_redis()
     # Check/increment the org-wide limit first, and only touch the
     # inviter's personal counter if that passes. An org already at its
