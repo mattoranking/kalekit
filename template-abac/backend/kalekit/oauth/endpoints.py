@@ -11,7 +11,9 @@ with a short TTL to prevent CSRF and replay attacks.
 import secrets
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import store_refresh_token
@@ -25,9 +27,26 @@ from kalekit.oauth.repository import find_or_create_oauth_user
 from kalekit.postgres import get_db_session
 from kalekit.redis import get_redis
 
+logger = structlog.get_logger()
+
 router = APIRouter(prefix="/oauth", tags=["oauth"])
 
 _STATE_TTL = 600  # 10 minutes
+
+
+def _oauth_unavailable(event: str) -> HTTPException:
+    """A clean 503 for a Redis failure on an OAuth path (#106).
+
+    The CSRF state lives only in Redis, so there is nothing to degrade
+    to: fail closed, but as a documented "dependency unavailable"
+    response instead of an unhandled 500. Password login doesn't touch
+    this state and stays available. Call from inside an `except
+    RedisError` block so the traceback is attached to the log.
+    """
+    logger.warning(event, exc_info=True)
+    return HTTPException(
+        status_code=503, detail="OAuth sign-in is temporarily unavailable"
+    )
 
 
 def _get_provider(provider: str):
@@ -50,11 +69,14 @@ async def oauth_authorize(provider: str):
     authorization_url, code_verifier = client.get_authorization_url(state)
 
     # Store state (and code_verifier for PKCE) in Redis
-    r = await get_redis()
     state_data = provider
     if code_verifier:
         state_data = f"{provider}:{code_verifier}"
-    await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
+    try:
+        r = await get_redis()
+        await r.set(f"oauth_state:{state}", state_data, ex=_STATE_TTL)
+    except RedisError as exc:
+        raise _oauth_unavailable("oauth_state_store_failed") from exc
 
     return {"authorization_url": authorization_url}
 
@@ -77,14 +99,17 @@ async def oauth_callback(
     client = _get_provider(provider)
 
     # --- Validate state ---
-    r = await get_redis()
     state_key = f"oauth_state:{state}"
-    state_data = await r.get(state_key)
-    if not state_data:
-        raise HTTPException(status_code=400, detail="Invalid or expired state")
+    try:
+        r = await get_redis()
+        state_data = await r.get(state_key)
+        if not state_data:
+            raise HTTPException(status_code=400, detail="Invalid or expired state")
 
-    # Delete immediately — state is single-use
-    await r.delete(state_key)
+        # Delete immediately — state is single-use
+        await r.delete(state_key)
+    except RedisError as exc:
+        raise _oauth_unavailable("oauth_state_check_failed") from exc
 
     # Parse code_verifier if present (Twitter PKCE)
     code_verifier: str | None = None
