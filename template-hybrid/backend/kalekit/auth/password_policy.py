@@ -11,13 +11,10 @@ sign in and change their password.
 
 The maximum exists so an attacker cannot make the server hash a
 multi-megabyte password. It is checked before anything is hashed or
-verified, so no input reaches the hasher unbounded.
-
-This template hashes with bcrypt, which only uses the first 72 bytes of
-a password. The length limit does not change that: a password longer
-than 72 bytes was always truncated by bcrypt, and the maximum (128
-characters) is not meant to prevent it. The check is about bounding the
-work an attacker can make the server do, not about the truncation.
+verified. This template verifies Argon2 hashes only, and the length
+check runs before any hasher, so no input reaches one unbounded. (If a
+bcrypt verifier is ever added, it truncates at 72 bytes; that would not
+be a new risk either, for the same reason.)
 """
 
 from typing import Annotated

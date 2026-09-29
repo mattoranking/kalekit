@@ -5,7 +5,9 @@ import jwt
 from kalekit.auth.service import (
     create_access_token,
     generate_refresh_token,
+    hash_password,
     hash_refresh_token,
+    verify_password,
 )
 from kalekit.config import settings
 
@@ -47,3 +49,21 @@ def test_create_access_token_is_a_pyjwt_token() -> None:
     assert payload["sub"] == "user-123"
     assert payload["type"] == "access"
     assert "jti" in payload
+
+
+def test_hash_password_produces_an_argon2_hash() -> None:
+    hashed = hash_password("correct-password")
+
+    assert hashed.startswith("$argon2")
+
+
+def test_verify_password_accepts_correct_password() -> None:
+    hashed = hash_password("correct-password")
+
+    assert verify_password("correct-password", hashed) is True
+
+
+def test_verify_password_rejects_wrong_password() -> None:
+    hashed = hash_password("correct-password")
+
+    assert verify_password("wrong-password", hashed) is False
