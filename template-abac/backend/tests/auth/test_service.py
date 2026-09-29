@@ -18,6 +18,8 @@ import redis.exceptions
 from kalekit.auth.service import (
     cache_refresh_grace_pair,
     get_cached_refresh_grace_pair,
+    hash_password,
+    verify_password,
 )
 
 
@@ -146,3 +148,21 @@ async def test_cache_read_treats_a_dict_missing_required_fields_as_a_miss(
     result = await get_cached_refresh_grace_pair("some-hash")
 
     assert result is None
+
+
+def test_hash_password_produces_an_argon2_hash() -> None:
+    hashed = hash_password("correct-password")
+
+    assert hashed.startswith("$argon2")
+
+
+def test_verify_password_accepts_correct_password() -> None:
+    hashed = hash_password("correct-password")
+
+    assert verify_password("correct-password", hashed) is True
+
+
+def test_verify_password_rejects_wrong_password() -> None:
+    hashed = hash_password("correct-password")
+
+    assert verify_password("wrong-password", hashed) is False

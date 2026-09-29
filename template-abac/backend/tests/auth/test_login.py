@@ -52,7 +52,7 @@ async def test_login_against_oauth_only_account_returns_401_not_500(
 ) -> None:
     """OAuth-only users are created with password_hash=None. Attempting a
     password login against their email must return a clean 401, not crash
-    passlib's CryptContext.verify() with a 500."""
+    the password hasher with a 500."""
     await find_or_create_oauth_user(
         session,
         platform="github",
