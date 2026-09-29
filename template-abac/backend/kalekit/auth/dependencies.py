@@ -2,16 +2,21 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import jwt
+import structlog
 from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.blocklist import is_any_blocked
 from kalekit.config import settings
 from kalekit.models.organization import Organization, OrganizationMember
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.utils.db.tenancy import tenant_filter
+
+logger = structlog.get_logger()
 
 bearer_scheme = HTTPBearer()
 
@@ -73,11 +78,36 @@ async def get_current_user(
 ) -> User:
     payload = _decode_access_token(credentials)
     user_id = payload.get("sub")
+    jti = payload.get("jti")
+
+    # Fail closed (#99): revocation state lives only in Redis, so if it
+    # can't be read there is no way to tell a live token from a revoked
+    # one, and letting the request through would honour revoked sessions
+    # for the length of the outage. Reject with a documented 503 rather
+    # than let the RedisError surface as an unhandled 500.
+    try:
+        blocked = await is_any_blocked(jti, user_id)
+    except RedisError as exc:
+        logger.warning("token_blocklist_check_failed", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication service temporarily unavailable",
+        ) from exc
+    if blocked:
+        raise HTTPException(status_code=401, detail="Token has been revoked")
 
     user = await session.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+async def get_current_jti(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
+) -> str | None:
+    """The current access token's unique id, for revoking it by itself
+    (e.g. on logout) rather than every token the user holds."""
+    return _decode_access_token(credentials).get("jti")
 
 
 async def require_org_member(
