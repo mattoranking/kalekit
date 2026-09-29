@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,27 +11,36 @@ from kalekit.auth.blocklist import block_token
 from kalekit.auth.dependencies import get_current_jti, get_current_user
 from kalekit.auth.repository import (
     create_user,
+    create_verification_token,
     find_user_by_email,
     get_refresh_token_by_hash_for_update,
     get_refresh_token_by_id,
+    get_valid_verification_token,
+    invalidate_user_verification_tokens,
     mark_refresh_token_replaced,
+    mark_verification_token_used,
     revoke_refresh_token_family,
     revoke_user_refresh_tokens,
     store_refresh_token,
 )
 from kalekit.auth.schemas import (
     LoginRequest,
+    MessageResponse,
     RefreshRequest,
     RegisterRequest,
     TokenResponse,
     UserResponse,
+    VerifyEmailRequest,
 )
 from kalekit.auth.service import (
     cache_refresh_grace_pair,
     create_access_token,
     generate_refresh_token,
+    generate_verification_token,
     get_cached_refresh_grace_pair,
     hash_refresh_token,
+    hash_verification_token,
+    verification_token_expiry,
     verify_password,
 )
 from kalekit.config import settings
@@ -39,6 +48,9 @@ from kalekit.models.user import User
 from kalekit.organization.repository import add_member, create_organization
 from kalekit.organization.schemas import OrganizationResponse
 from kalekit.postgres import get_db_session
+from kalekit.redis import get_redis
+from kalekit.utils.email import get_email_sender, send_verification_email
+from kalekit.utils.rate_limit import check_and_increment, rate_limit_fails_open
 
 logger = structlog.get_logger()
 
@@ -49,12 +61,21 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 async def register(
     body: RegisterRequest,
     session: Annotated[AsyncSession, Depends(get_db_session)],
+    background_tasks: BackgroundTasks,
 ):
+    # Surface a deployment with no real email provider as a request-time
+    # failure before anything is written (see get_email_sender), instead
+    # of a registration that silently never sends its verification link.
+    get_email_sender()
+
     existing = await find_user_by_email(session, body.email)
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
 
-    user = await create_user(session, body.email, body.password)
+    # Password sign-ups always start unverified -- verification proves
+    # the registrant controls this mailbox, which is what lets OAuth
+    # account-linking trust the email later (see oauth/repository.py).
+    user = await create_user(session, body.email, body.password, email_verified=False)
 
     # Every user always belongs to at least one organization — there is
     # no such thing as a signup without a tenant in this style. The
@@ -66,13 +87,37 @@ async def register(
     )
     await add_member(session, organization_id=organization.id, user_id=user.id)
 
+    await _issue_and_queue_verification_email(session, background_tasks, user)
+
     return UserResponse(
         id=user.id,
         email=user.email,
         is_active=user.is_active,
+        email_verified=user.email_verified,
         created_at=user.created_at,
         organizations=[OrganizationResponse.model_validate(organization)],
     )
+
+
+async def _issue_and_queue_verification_email(
+    session: AsyncSession, background_tasks: BackgroundTasks, user: User
+) -> None:
+    """Persist a fresh verification token and email the link.
+
+    The send is deferred to a background task, the same way invitations
+    are, so it runs after the response is built. FastAPI runs background
+    tasks before the request's session dependency commits, so the email
+    goes out just before the token row is committed.
+    """
+    assert user.email is not None
+    raw_token = generate_verification_token()
+    await create_verification_token(
+        session,
+        user_id=user.id,
+        token_hash=hash_verification_token(raw_token),
+        expires_at=verification_token_expiry(),
+    )
+    background_tasks.add_task(send_verification_email, to=user.email, token=raw_token)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -91,6 +136,8 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
+    if settings.REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN and not user.email_verified:
+        raise HTTPException(status_code=403, detail="Email verification required")
 
     access_token = create_access_token(str(user.id))
     refresh_token, expires_at = generate_refresh_token()
@@ -242,9 +289,72 @@ async def me(user: Annotated[User, Depends(get_current_user)]):
         id=user.id,
         email=user.email,
         is_active=user.is_active,
+        email_verified=user.email_verified,
         created_at=user.created_at,
         organizations=[
             OrganizationResponse.model_validate(m.organization)
             for m in user.memberships
         ],
     )
+
+
+@router.post("/verify-email", response_model=MessageResponse)
+async def verify_email(
+    body: VerifyEmailRequest,
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+):
+    token = await get_valid_verification_token(
+        session, hash_verification_token(body.token)
+    )
+    if not token:
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired verification token"
+        )
+
+    user = await session.get(User, token.user_id)
+    if not user:
+        raise HTTPException(
+            status_code=400, detail="Invalid or expired verification token"
+        )
+
+    user.email_verified = True
+    await mark_verification_token_used(session, token)
+
+    return MessageResponse(detail="Email verified")
+
+
+@router.post("/resend-verification", response_model=MessageResponse)
+async def resend_verification(
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    background_tasks: BackgroundTasks,
+):
+    if user.email_verified:
+        return MessageResponse(detail="Email already verified")
+    if user.email is None:
+        # An OAuth user whose provider gave no email has nowhere to send a
+        # link to.
+        raise HTTPException(status_code=400, detail="Account has no email address")
+
+    get_email_sender()
+
+    with rate_limit_fails_open("resend_verification"):
+        r = await get_redis()
+        allowed = await check_and_increment(
+            r,
+            f"resend_verification_rate:user:{user.id}",
+            limit=settings.RESEND_VERIFICATION_RATE_LIMIT_PER_USER,
+            window_seconds=settings.RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many verification emails, try again later",
+            )
+
+    # Open to any authenticated user regardless of require_verified_email:
+    # an unverified user still needs a way to request a fresh link.
+    await invalidate_user_verification_tokens(session, user.id)
+    await _issue_and_queue_verification_email(session, background_tasks, user)
+
+    return MessageResponse(detail="Verification email sent")

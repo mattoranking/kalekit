@@ -11,6 +11,7 @@ with a short TTL to prevent CSRF and replay attacks.
 import secrets
 from typing import Annotated
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from redis.exceptions import RedisError
@@ -22,8 +23,12 @@ from kalekit.auth.service import (
     generate_refresh_token,
     hash_refresh_token,
 )
+from kalekit.config import settings
 from kalekit.oauth.client import OAUTH_PROVIDERS
-from kalekit.oauth.repository import find_or_create_oauth_user
+from kalekit.oauth.repository import (
+    OAuthAccountLinkingError,
+    find_or_create_oauth_user,
+)
 from kalekit.postgres import get_db_session
 from kalekit.redis import get_redis
 
@@ -147,13 +152,22 @@ async def oauth_callback(
     account_id, account_email, display_name = _extract_user_info(provider, user_info)
 
     # --- Find or create local user ---
-    user = await find_or_create_oauth_user(
-        session,
-        platform=provider,
-        account_id=account_id,
-        account_email=account_email,
-        display_name=display_name,
+    provider_email_verified = await _get_provider_email_verified(
+        provider, user_info, provider_access_token, account_email
     )
+    try:
+        user = await find_or_create_oauth_user(
+            session,
+            platform=provider,
+            account_id=account_id,
+            account_email=account_email,
+            display_name=display_name,
+            provider_email_verified=provider_email_verified,
+        )
+    except OAuthAccountLinkingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if settings.REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN and not user.email_verified:
+        raise HTTPException(status_code=403, detail="Email verification required")
 
     # --- Issue our token pair ---
     access_token = create_access_token(str(user.id))
@@ -210,3 +224,48 @@ def _extract_user_info(
         )
 
     raise ValueError(f"Unknown provider: {provider}")
+
+
+async def _get_provider_email_verified(
+    provider: str,
+    user_info: dict,
+    access_token: str,
+    account_email: str | None,
+) -> bool:
+    """Does the IdP itself vouch that `account_email` is verified?
+
+    find_or_create_oauth_user uses this to decide whether it is safe to
+    link an OAuth sign-in to an existing password account (see the
+    docstring there for the attack this guards against). Each provider
+    is handled explicitly; an unknown one defaults to unverified.
+    """
+    if not account_email:
+        return False
+
+    if provider == "google":
+        # Google's userinfo response includes this directly.
+        return bool(user_info.get("verified_email", False))
+
+    if provider == "github":
+        # GitHub's /user endpoint doesn't carry verification status for
+        # the profile email, so ask /user/emails (covered by the
+        # `user:email` scope we request) and check the matching entry.
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    "https://api.github.com/user/emails",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/json",
+                    },
+                )
+                response.raise_for_status()
+                emails = response.json()
+        except Exception:
+            return False
+        return any(
+            e.get("email") == account_email and e.get("verified") for e in emails
+        )
+
+    # Twitter never returns an email, so account_email is None above.
+    return False
