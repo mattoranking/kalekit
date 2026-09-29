@@ -165,3 +165,28 @@ def test_dummy_hash_is_argon2_with_current_hasher_parameters() -> None:
     constant keeps the parameters Argon2Hasher() produces today."""
     assert not password_hash.current_hasher.check_needs_rehash(DUMMY_PASSWORD_HASH)
     assert DUMMY_PASSWORD_HASH.startswith("$argon2id$")
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_oauth_only_account_is_refused_even_if_dummy_verify_succeeds(
+    session: AsyncSession,
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dummy hash's password is unknowable, but the guard must not
+    depend on that: an OAuth-only account (no password_hash) never logs
+    in by password, even if the verifier reports a match."""
+    await find_or_create_oauth_user(
+        session,
+        platform="github",
+        account_id="oauth-only-guard",
+        account_email="oauth-guard@example.com",
+    )
+    monkeypatch.setattr(auth_endpoints, "verify_password", lambda plain, hashed: True)
+
+    response = await client.post(
+        "/v1/auth/login",
+        json={"email": "oauth-guard@example.com", "password": "any-password"},
+    )
+
+    assert response.status_code == 401
