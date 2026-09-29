@@ -8,27 +8,29 @@ from typing import Any
 import jwt
 import redis.exceptions
 import structlog
-from passlib.context import CryptContext
+from pwdlib import PasswordHash
+from pwdlib.hashers.argon2 import Argon2Hasher
 
 from kalekit.auth.password_policy import password_too_long
 from kalekit.config import settings
 from kalekit.redis import get_redis
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Argon2 is the scheme for every password hash (per current FastAPI docs).
+password_hash = PasswordHash([Argon2Hasher()])
 logger = structlog.get_logger()
 
 
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    return password_hash.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     # An oversized password can never match one that was accepted at
-    # registration, so reject it before bcrypt runs. Callers see the
+    # registration, so reject it before Argon2 runs. Callers see the
     # same False as for a wrong password, so login stays uniform.
     if password_too_long(plain):
         return False
-    return pwd_context.verify(plain, hashed)
+    return password_hash.verify(plain, hashed)
 
 
 def create_access_token(user_id: str) -> str:
