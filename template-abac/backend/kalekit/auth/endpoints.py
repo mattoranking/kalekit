@@ -33,6 +33,7 @@ from kalekit.auth.schemas import (
     VerifyEmailRequest,
 )
 from kalekit.auth.service import (
+    DUMMY_PASSWORD_HASH,
     cache_refresh_grace_pair,
     create_access_token,
     generate_refresh_token,
@@ -182,12 +183,15 @@ async def login(
                 raise rate_limited(await r.ttl(account_key))
 
     user = await find_user_by_email(session, body.email)
-    password_hash = user.password_hash if user else None
-    if (
-        not user
-        or not password_hash
-        or not verify_password(body.password, password_hash)
-    ):
+
+    # Always run exactly one hash verification, even when the email is
+    # unknown or the account is OAuth-only (password_hash None), so all
+    # three failure paths take the same time and cannot be told apart
+    # by response latency.
+    password_hash = (user.password_hash if user else None) or DUMMY_PASSWORD_HASH
+    password_valid = verify_password(body.password, password_hash)
+
+    if not user or not user.password_hash or not password_valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
