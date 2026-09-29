@@ -95,6 +95,13 @@ class Settings(BaseSettings):
     # Frontend (used to build links embedded in emails)
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Email verification
+    # When True, unverified accounts can't log in at all. When False
+    # (default), they can log in but require_verified_email gates
+    # anything beyond profile/resend-verification.
+    REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN: bool = False
+    EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+
     # Organization invitations
     INVITATION_TOKEN_EXPIRE_HOURS: int = 72
     # Fixed-window rate limits on POST /organizations/{id}/invitations,

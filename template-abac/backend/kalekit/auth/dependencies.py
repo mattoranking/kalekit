@@ -111,6 +111,18 @@ async def get_current_jti(
     return _decode_access_token(credentials)["jti"]
 
 
+async def require_verified_email(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Gate for anything beyond profile / resend-verification when
+    REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN is off -- unverified users
+    can still log in and reach `/auth/me` and `/auth/resend-verification`,
+    but not routes that depend on this."""
+    if not user.email_verified:
+        raise HTTPException(status_code=403, detail="Email verification required")
+    return user
+
+
 async def require_org_member(
     organization_id: UUID,
     user: Annotated[User, Depends(get_current_user)],

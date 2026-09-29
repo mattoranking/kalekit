@@ -1,6 +1,7 @@
 """Pluggable outbound email.
 
-Ported from RBAC #7. Only organization invitations use this today.
+Ported from RBAC #7. Organization invitations and email verification use
+this.
 `ConsoleEmailSender` is the default for local/dev/test -- it just logs
 the message instead of sending it, so the kit works out of the box
 without SMTP credentials. Swap `get_email_sender` for a real provider
@@ -54,6 +55,22 @@ def get_email_sender() -> EmailSender:
     )
 
 
+async def send_verification_email(*, to: str, token: str) -> None:
+    verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+    sender = get_email_sender()
+    await sender.send(
+        to=to,
+        subject="Verify your email address",
+        body=(
+            "Welcome! Please verify your email address by visiting the "
+            f"link below:\n\n{verify_url}\n\n"
+            "This link expires in "
+            f"{settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS} hours and can "
+            "only be used once."
+        ),
+    )
+
+
 async def send_invitation_email(
     *, to: str, organization_name: str, token: str
 ) -> None:
@@ -85,4 +102,5 @@ __all__ = [
     "EmailSender",
     "get_email_sender",
     "send_invitation_email",
+    "send_verification_email",
 ]

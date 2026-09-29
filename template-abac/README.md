@@ -89,6 +89,16 @@ user is matched), `account_email` and `user_id`. If you later need to call a
 provider's API on the user's behalf, add an encrypted token store first. Sign
 in with Apple (#19) will need one to revoke tokens on account deletion.
 
+An OAuth sign-in links to an existing account with the same email only when
+the provider reports the email as verified **and** the existing account's
+email is verified; otherwise the callback returns `409`. Password sign-ups
+start unverified and get an emailed link (`POST /auth/verify-email`,
+`POST /auth/resend-verification`). Unverified users can log in by default;
+set `KALEKIT_REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN=true` to refuse login
+until verified, or put the `require_verified_email` dependency on routes that
+need a verified address. `/auth/register` needs a working email sender (see
+`utils/email.py`) outside development and testing.
+
 ## Security headers
 
 The API (`backend/kalekit/security.py`), Traefik (HSTS, HTTPS routers only) and

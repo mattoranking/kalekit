@@ -172,11 +172,12 @@ async def test_inviting_with_no_email_provider_configured_fails_the_request(
     email -- which runs after the 202 is already on the wire, so the
     caller would be told "invitation sent" for an email that never
     goes out (issue #81)."""
-    monkeypatch.setattr(settings, "ENV", Environment.production)
-
     await register("alice@example.com")
     token_alice = await login("alice@example.com")
     org_a = await org_id_for("alice@example.com")
+    # After registering: /auth/register also needs an email sender (for the
+    # verification link), so it would fail under the production env too.
+    monkeypatch.setattr(settings, "ENV", Environment.production)
 
     with pytest.raises(RuntimeError):
         await client.post(
