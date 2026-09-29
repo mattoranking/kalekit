@@ -20,7 +20,7 @@ INSECURE_JWT_SECRETS = {
 # recommended key size for HMAC-SHA256 -- shorter keys are brute-forceable.
 MIN_JWT_SECRET_KEY_BYTES = 32
 
-_GENERATE_SECRET_HINT = 'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+_GENERATE_SECRET_HINT = 'python3 -c "import secrets; print(secrets.token_urlsafe(48))"'
 
 
 class Environment(StrEnum):
@@ -174,6 +174,10 @@ class Settings(BaseSettings):
         case_sensitive=False,
         env_file=env_file,
         extra="allow",
+        # pydantic appends the (truncated) settings input to validation
+        # errors, and its tail can be a real secret that then lands in
+        # deploy logs.
+        hide_input_in_errors=True,
     )
 
     @model_validator(mode="after")

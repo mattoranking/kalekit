@@ -98,3 +98,19 @@ def test_non_dev_environments_accept_strong_previous_key(env: Environment) -> No
     settings = _settings(env, "s" * 32, {"old": "o" * 32})
 
     assert settings.JWT_PREVIOUS_KEYS == {"old": "o" * 32}
+
+
+@pytest.mark.parametrize("env", NON_DEV_ENVIRONMENTS)
+def test_rejected_secret_value_is_not_echoed_in_the_error(env: Environment) -> None:
+    """pydantic appends `input_value=<settings dict>` to validation errors,
+    truncated to its head and tail, and that tail can hold a real secret
+    (here the last field set) that ends up in deploy logs.
+    """
+    secret = "Rk9vQmFyQmF6UXV4MTIzNDU2"  # 24 bytes: fails the length check
+
+    with pytest.raises(ValueError) as excinfo:
+        _settings(env, secret)
+
+    assert "too short" in str(excinfo.value)
+    assert secret not in str(excinfo.value)
+    assert "input_value" not in str(excinfo.value)
