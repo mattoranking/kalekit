@@ -25,6 +25,20 @@ from kalekit.organization.service import (
 )
 
 
+@pytest_asyncio.fixture(loop_scope="session", autouse=True)
+async def clear_redis() -> AsyncGenerator[None]:
+    """Redis isn't part of the per-test Postgres rollback below, so
+    rate-limit counters (keyed by IP or email, which tests reuse) from an
+    earlier test would leak into a later one. Flush it before every test
+    so the rate-limit tests don't depend on what ran before them.
+    """
+    from kalekit.redis import get_redis
+
+    redis = await get_redis()
+    await redis.flushdb()
+    yield
+
+
 @pytest_asyncio.fixture(scope="session", loop_scope="session")
 async def engine() -> AsyncGenerator[AsyncEngine]:
     """Create a test database engine (once per test session)."""
