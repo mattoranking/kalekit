@@ -1,4 +1,5 @@
 import json
+from collections.abc import Iterable
 
 import redis.asyncio as redis
 import structlog
@@ -29,21 +30,28 @@ async def get_permissions_for_roles(
     """Fetch permissions for a list of roles, Redis cache first.
 
     Redis is only a performance cache; Postgres is the source of truth.
-    A Redis error on the read is treated as a cache miss, and one on the
-    write-back just skips caching, so an outage degrades to one DB query
-    per role (still correct) instead of a 500 (#98).
+    The cache is read with one MGET for all roles, the roles it does not
+    answer are loaded with one DB query, and the results are written back
+    in one pipeline (#128). A Redis error on the read is treated as a
+    cache miss for every role, and one on the write-back just skips
+    caching, so an outage degrades to one DB query (still correct)
+    instead of a 500 (#98).
     """
+    unique_roles = list(dict.fromkeys(roles))
+    if not unique_roles:
+        return set()
+
+    keys = [_role_cache_key(role) for role in unique_roles]
+    cached_values: list[str | None] = [None] * len(keys)
+    try:
+        r = await get_redis()
+        cached_values = await r.mget(keys)
+    except RedisError:
+        logger.warning("role_permission_cache_read_failed", exc_info=True)
+
     permissions: set[str] = set()
-    for role in roles:
-        key = f"role:{role}:permissions"
-        cached = None
-        try:
-            r = await get_redis()
-            cached = await r.get(key)
-        except RedisError:
-            logger.warning(
-                "role_permission_cache_read_failed", role=role, exc_info=True
-            )
+    missing: list[str] = []
+    for role, cached in zip(unique_roles, cached_values, strict=True):
         if cached:
             try:
                 decoded = json.loads(cached)
@@ -60,29 +68,42 @@ async def get_permissions_for_roles(
                 logger.warning(
                     "role_permission_cache_corrupt", role=role, exc_info=True
                 )
-        # Cache miss (or Redis unavailable) - load from DB then cache
-        perms: set[str] = await _load_permissions_from_db(session, role)
-        try:
-            r = await get_redis()
-            await r.set(
-                key,
-                json.dumps(list(perms)),
-                ex=settings.ROLE_CACHE_TTL_SECONDS,
-            )
-        except RedisError:
-            # The check already succeeded via the DB; a failed cache
-            # write must not turn it into an error.
-            logger.warning(
-                "role_permission_cache_write_failed", role=role, exc_info=True
-            )
-        permissions.update(perms)
+        missing.append(role)
+
+    if not missing:
+        return permissions
+
+    # Cache miss (or Redis unavailable) - load from DB then cache
+    loaded = await _load_permissions_from_db_bulk(session, missing)
+    try:
+        r = await get_redis()
+        async with r.pipeline(transaction=False) as pipe:
+            for role in missing:
+                pipe.set(
+                    _role_cache_key(role),
+                    json.dumps(list(loaded[role])),
+                    ex=settings.ROLE_CACHE_TTL_SECONDS,
+                )
+            await pipe.execute()
+    except RedisError:
+        # The check already succeeded via the DB; a failed cache
+        # write must not turn it into an error.
+        logger.warning("role_permission_cache_write_failed", exc_info=True)
+    for role in missing:
+        permissions.update(loaded[role])
     return permissions
 
 
-async def _load_permissions_from_db(
-    session: AsyncSession, role_name: str
-) -> set[str]:
-    """Fallback: query DB and populate Redis.
+def _role_cache_key(role: str) -> str:
+    return f"role:{role}:permissions"
+
+
+async def _load_permissions_from_db_bulk(
+    session: AsyncSession, role_names: list[str]
+) -> dict[str, set[str]]:
+    """Fallback: load the permissions of every role in `role_names` with a
+    single query. A role that does not exist, or has no permissions, maps
+    to an empty set.
 
     Uses the caller's own session/transaction rather than opening a
     separate engine and connection -- a role's permissions granted
@@ -97,13 +118,24 @@ async def _load_permissions_from_db(
     from kalekit.sql import select
 
     stmt = (
-        select(Permission.name)
-        .join(RolePermission)
-        .join(Role)
-        .where(Role.name == role_name)
+        select(Role.name, Permission.name)
+        .select_from(RolePermission)
+        .join(Role, Role.id == RolePermission.role_id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(Role.name.in_(role_names))
     )
     result = await session.execute(stmt)
-    return {row[0] for row in result.all()}
+    loaded: dict[str, set[str]] = {name: set() for name in role_names}
+    for role_name, permission_name in result.all():
+        loaded[role_name].add(permission_name)
+    return loaded
+
+
+async def _load_permissions_from_db(
+    session: AsyncSession, role_name: str
+) -> set[str]:
+    """One role's permissions straight from the DB (no cache)."""
+    return (await _load_permissions_from_db_bulk(session, [role_name]))[role_name]
 
 
 async def invalidate_role_cache(role_name: str) -> None:
@@ -186,6 +218,30 @@ async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) ->
         else settings.access_token_max_expire_minutes() * 60
     )
     await r.set(f"blocked_family:{family_id}", "1", ex=ttl)
+
+
+async def block_families_tokens(
+    family_ids: Iterable[str], ttl_seconds: int | None = None
+) -> None:
+    """`block_family_tokens` for several sessions at once: every SET goes
+    out in one pipeline, so revoking N sessions is one Redis round trip
+    instead of N (#129). Like the single version it raises RedisError on
+    a failure and does not swallow it: the caller decides how to fail
+    closed. An empty list makes no Redis call.
+    """
+    ids = list(family_ids)
+    if not ids:
+        return
+    r = await get_redis()
+    ttl = (
+        ttl_seconds
+        if ttl_seconds is not None
+        else settings.access_token_max_expire_minutes() * 60
+    )
+    async with r.pipeline(transaction=False) as pipe:
+        for family_id in ids:
+            pipe.set(f"blocked_family:{family_id}", "1", ex=ttl)
+        await pipe.execute()
 
 
 async def is_any_blocked(

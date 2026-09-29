@@ -1,3 +1,4 @@
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
@@ -75,27 +76,36 @@ class RoleSeedFile(BaseModel):
         return self
 
 
-def _load_role_definitions() -> dict[str, RoleDefinition]:
-    """Parse `roles.yaml` into role definitions.
+@lru_cache(maxsize=4)
+def _parse_seed_file(path: Path, mtime_ns: int, size: int) -> dict[str, RoleDefinition]:
+    """Parse and validate one version of the seed file.
 
-    Re-read (not cached) on every call: the file is tiny, this only
-    runs on registration/OAuth-signup/admin-creation paths (not hot
-    request paths), and not caching keeps this function's behavior
-    predictable if the file is ever swapped out between calls (e.g.
-    in tests).
+    `mtime_ns` and `size` are not read here; they are part of the cache
+    key so that a changed file is parsed again (#127).
     """
-    with ROLE_SEED_FILE.open() as f:
+    with path.open() as f:
         raw = yaml.safe_load(f)
 
     seed_file = RoleSeedFile.model_validate(raw)
 
     for required in (VISITOR_ROLE, ADMIN_ROLE):
         if required not in seed_file.roles:
-            raise ValueError(
-                f"{ROLE_SEED_FILE} is missing required role '{required}'"
-            )
+            raise ValueError(f"{path} is missing required role '{required}'")
 
     return seed_file.roles
+
+
+def _load_role_definitions() -> dict[str, RoleDefinition]:
+    """Parse `roles.yaml` into role definitions.
+
+    `ensure_default_roles` runs on every registration and OAuth signup,
+    so the parsed result is cached per file version: the file is parsed
+    once, and only parsed again when its modification time or size
+    changes (a redeploy, or a test that swaps the file). A file that
+    fails validation is not cached and raises on every call.
+    """
+    stat = ROLE_SEED_FILE.stat()
+    return dict(_parse_seed_file(ROLE_SEED_FILE, stat.st_mtime_ns, stat.st_size))
 
 
 async def _get_or_create_role(
@@ -160,8 +170,52 @@ async def _get_or_create_permission(session: AsyncSession, name: str) -> Permiss
     return permission
 
 
+async def _get_or_create_roles(
+    session: AsyncSession, definitions: dict[str, RoleDefinition]
+) -> dict[str, Role]:
+    """Load every role in `definitions` with one SELECT and create or
+    update only the ones that are missing or out of date, so a signup
+    against a seeded database costs a constant number of statements no
+    matter how many roles `roles.yaml` lists (#127)."""
+    result = await session.execute(select(Role).where(Role.name.in_(list(definitions))))
+    existing = {role.name: role for role in result.scalars().all()}
+
+    roles: dict[str, Role] = {}
+    for name, definition in definitions.items():
+        role = existing.get(name)
+        if role is None:
+            # First run, or a role added to the file: the same
+            # savepoint-and-reselect race handling as the single lookup.
+            role = await _get_or_create_role(session, name, definition.description)
+        elif role.description != definition.description:
+            role.description = definition.description
+            await session.flush()
+        roles[name] = role
+    return roles
+
+
+async def _load_granted_permissions(
+    session: AsyncSession, roles: dict[str, Role]
+) -> dict[str, set[str]]:
+    """The permission names each role already holds, for all roles at
+    once (one SELECT), keyed by role name."""
+    role_names_by_id = {role.id: name for name, role in roles.items()}
+    result = await session.execute(
+        select(RolePermission.role_id, Permission.name)
+        .join(Permission, RolePermission.permission_id == Permission.id)
+        .where(RolePermission.role_id.in_(list(role_names_by_id)))
+    )
+    granted: dict[str, set[str]] = {name: set() for name in roles}
+    for role_id, permission_name in result.all():
+        granted[role_names_by_id[role_id]].add(permission_name)
+    return granted
+
+
 async def _ensure_role_permissions(
-    session: AsyncSession, role: Role, permission_names: list[str]
+    session: AsyncSession,
+    role: Role,
+    permission_names: list[str],
+    already_granted: set[str] | None = None,
 ) -> None:
     """Grant `role` every permission in `permission_names` it doesn't
     already have.
@@ -178,12 +232,13 @@ async def _ensure_role_permissions(
     if not permission_names:
         return
 
-    existing = await session.execute(
-        select(Permission.name)
-        .join(RolePermission, RolePermission.permission_id == Permission.id)
-        .where(RolePermission.role_id == role.id)
-    )
-    already_granted = set(existing.scalars().all())
+    if already_granted is None:
+        existing = await session.execute(
+            select(Permission.name)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .where(RolePermission.role_id == role.id)
+        )
+        already_granted = set(existing.scalars().all())
     missing = [name for name in permission_names if name not in already_granted]
     if not missing:
         return
@@ -227,9 +282,8 @@ async def ensure_default_roles(session: AsyncSession) -> tuple[Role, Role]:
     """
     definitions = _load_role_definitions()
 
-    roles: dict[str, Role] = {}
-    for name, definition in definitions.items():
-        roles[name] = await _get_or_create_role(session, name, definition.description)
+    roles = await _get_or_create_roles(session, definitions)
+    granted = await _load_granted_permissions(session, roles)
 
     for name, definition in definitions.items():
         permission_names = (
@@ -237,7 +291,9 @@ async def ensure_default_roles(session: AsyncSession) -> tuple[Role, Role]:
             if definition.permissions == [ALL_SCOPES_WILDCARD]
             else definition.permissions
         )
-        await _ensure_role_permissions(session, roles[name], permission_names)
+        await _ensure_role_permissions(
+            session, roles[name], permission_names, granted[name]
+        )
 
     return roles[VISITOR_ROLE], roles[ADMIN_ROLE]
 

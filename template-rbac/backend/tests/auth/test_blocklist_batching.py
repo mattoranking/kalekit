@@ -30,22 +30,31 @@ class _CallCountingSpy:
     re-implementation of Redis semantics, and never relies on timing.
     """
 
-    def __init__(self, wrapped):
+    def __init__(self, wrapped, only_keys_starting_with: tuple[str, ...] = ()):
         self._wrapped = wrapped
+        self._prefixes = only_keys_starting_with
         self.await_count = 0
 
     async def __call__(self, *args, **kwargs):
-        self.await_count += 1
+        # An optional filter lets a test count only the blocklist MGETs and
+        # ignore MGETs for other keys (the role permission cache, #128).
+        if not self._prefixes or any(
+            key.startswith(self._prefixes) for key in args[0]
+        ):
+            self.await_count += 1
         return await self._wrapped(*args, **kwargs)
 
 
-async def _spy_on_mget(monkeypatch: pytest.MonkeyPatch) -> _CallCountingSpy:
+async def _spy_on_mget(
+    monkeypatch: pytest.MonkeyPatch,
+    only_keys_starting_with: tuple[str, ...] = (),
+) -> _CallCountingSpy:
     """Wrap the real (test) redis client's `mget` with a call-counting
     spy, while still delegating to the real implementation -- so the
     test asserts round-trip *count*, not a re-implementation of Redis
     semantics."""
     r = await get_redis()
-    spy = _CallCountingSpy(r.mget)
+    spy = _CallCountingSpy(r.mget, only_keys_starting_with)
     monkeypatch.setattr(r, "mget", spy)
     return spy
 
@@ -149,7 +158,9 @@ async def test_get_current_user_hits_redis_once_for_a_valid_token(
     assert login_response.status_code == 200
     token = login_response.json()["access_token"]
 
-    spy = await _spy_on_mget(monkeypatch)
+    # The /chat/ route also reads the role permission cache with an MGET
+    # (#128); only the blocklist MGET is under test here.
+    spy = await _spy_on_mget(monkeypatch, ("blocked_",))
 
     response = await client.get("/v1/chat/", headers=auth_header(token))
 

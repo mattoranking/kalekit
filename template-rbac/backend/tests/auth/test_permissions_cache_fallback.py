@@ -2,8 +2,8 @@
 
 `get_permissions_for_roles` uses Redis purely as a performance cache;
 Postgres is the source of truth. A Redis outage must degrade to "one DB
-query per check, still correct" -- on the read (`get`) and on the
-write-back (`set`) -- never to an unhandled 500. Results are compared
+query per check, still correct" -- on the read (`mget`) and on the
+write-back (`pipeline().set`) -- never to an unhandled 500. Results are compared
 against the DB loader so a fallback that silently returned less (or
 more) than the DB says would fail too.
 """
@@ -26,7 +26,8 @@ def _outage() -> redis.exceptions.ConnectionError:
 
 
 class _FakeRedis:
-    """Minimal in-memory stand-in; `get`/`set` can be made to raise."""
+    """Minimal in-memory stand-in; the read (`mget`) and the write-back
+    (a `pipeline()` of `set`s) can be made to raise."""
 
     def __init__(
         self, *, fail_get: bool = False, fail_set: bool = False
@@ -36,16 +37,34 @@ class _FakeRedis:
         self.store: dict[str, str] = {}
         self.set_calls = 0
 
-    async def get(self, key: str) -> str | None:
+    async def mget(self, keys: list[str]) -> list[str | None]:
         if self.fail_get:
             raise _outage()
-        return self.store.get(key)
+        return [self.store.get(key) for key in keys]
 
-    async def set(self, key: str, value: str, **kwargs: object) -> None:
-        self.set_calls += 1
-        if self.fail_set:
+    def pipeline(self, transaction: bool = True) -> "_FakePipeline":
+        return _FakePipeline(self)
+
+
+class _FakePipeline:
+    def __init__(self, redis: _FakeRedis) -> None:
+        self._redis = redis
+        self._queued: list[tuple[str, str]] = []
+
+    async def __aenter__(self) -> "_FakePipeline":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+    def set(self, key: str, value: str, **kwargs: object) -> None:
+        self._queued.append((key, value))
+
+    async def execute(self) -> None:
+        self._redis.set_calls += len(self._queued)
+        if self._redis.fail_set:
             raise _outage()
-        self.store[key] = value
+        self._redis.store.update(self._queued)
 
 
 def _patch_redis(monkeypatch: pytest.MonkeyPatch, fake: object) -> None:
