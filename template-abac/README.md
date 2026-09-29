@@ -96,8 +96,9 @@ start unverified and get an emailed link (`POST /auth/verify-email`,
 `POST /auth/resend-verification`). Unverified users can log in by default;
 set `KALEKIT_REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN=true` to refuse login
 until verified, or put the `require_verified_email` dependency on routes that
-need a verified address. `/auth/register` needs a working email sender (see
-`utils/email.py`) outside development and testing.
+need a verified address. Outside production the email is printed to the
+server console (see `utils/email.py`); in production `/auth/register` and the
+other email endpoints fail until a real email sender is wired in.
 
 ## Security headers
 

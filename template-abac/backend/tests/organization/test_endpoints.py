@@ -166,7 +166,7 @@ async def test_inviting_with_no_email_provider_configured_fails_the_request(
     org_id_for,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`get_email_sender` raises outside dev/test when no real provider
+    """`get_email_sender` raises in production when no real provider
     is configured. That must fail the invite request itself, not get
     swallowed inside the `BackgroundTasks` callback that sends the
     email -- which runs after the 202 is already on the wire, so the

@@ -10,12 +10,29 @@ def test_get_email_sender_returns_console_sender_in_testing() -> None:
     assert isinstance(get_email_sender(), ConsoleEmailSender)
 
 
-def test_get_email_sender_raises_outside_dev_and_testing(
+@pytest.mark.parametrize(
+    "environment",
+    [
+        Environment.development,
+        Environment.testing,
+        Environment.preview,
+        Environment.staging,
+    ],
+)
+def test_get_email_sender_returns_console_sender_outside_production(
+    monkeypatch: pytest.MonkeyPatch, environment: Environment
+) -> None:
+    monkeypatch.setattr(settings, "ENV", environment)
+
+    assert isinstance(get_email_sender(), ConsoleEmailSender)
+
+
+def test_get_email_sender_raises_in_production(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`ConsoleEmailSender` logs secrets (invitation tokens) via structlog
-    -- it must never be the silent default anywhere outside dev/test,
-    or a real deployment could leak them into application logs."""
+    """`ConsoleEmailSender` logs secrets (invitation and verification
+    tokens) via structlog -- it must never be the silent default in
+    production, or a real deployment could leak them into its logs."""
     monkeypatch.setattr(settings, "ENV", Environment.production)
 
     with pytest.raises(RuntimeError):
