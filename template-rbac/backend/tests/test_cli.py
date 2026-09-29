@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import delete, select
 
 from kalekit.auth.client_type import ClientType
 from kalekit.auth.repository import (
@@ -14,6 +15,7 @@ from kalekit.auth.repository import (
 from kalekit.cli import build_parser, create_admin, generate_secret
 from kalekit.cli import prune_refresh_tokens_cli as _prune_refresh_tokens_cli
 from kalekit.config import MIN_JWT_SECRET_KEY_BYTES
+from kalekit.models.role import Permission, Role, RolePermission, UserRole
 from kalekit.postgres import create_async_engine
 from kalekit.utils.db.database import create_async_sessionmaker
 
@@ -144,6 +146,106 @@ async def test_create_admin_is_idempotent(cli_email: Callable[[str], str]) -> No
     await create_admin(email, None)
 
     assert await _fetch_role_names(email) == ["admin"]
+
+
+async def _empty_auth_schema() -> None:
+    """Delete every role, permission, grant and user-role row, committed.
+
+    Children go first because of the foreign keys. No other test in the
+    module depends on these rows surviving: each one either seeds them
+    through `ensure_default_roles` or runs inside the rolled-back
+    `session` fixture.
+    """
+    engine = create_async_engine("kalekit")
+    try:
+        async with create_async_sessionmaker(engine)() as session:
+            await session.execute(delete(UserRole))
+            await session.execute(delete(RolePermission))
+            await session.execute(delete(Permission))
+            await session.execute(delete(Role))
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def empty_auth_schema() -> AsyncGenerator[None]:
+    await _empty_auth_schema()
+    yield
+    await _empty_auth_schema()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_admin_on_an_empty_auth_schema_seeds_and_grants_admin(
+    empty_auth_schema: None,
+    cli_email: Callable[[str], str],
+    capsys: pytest.CaptureFixture,
+) -> None:
+    email = cli_email("cli-empty-schema")
+
+    await create_admin(email, "password12345")
+
+    assert capsys.readouterr().out.strip() == (
+        f"Created {email} and granted the admin role."
+    )
+    assert await _fetch_role_names(email) == ["admin"]
+
+    engine = create_async_engine("kalekit")
+    try:
+        async with create_async_sessionmaker(engine)() as session:
+            role_names = set((await session.scalars(select(Role.name))).all())
+            granted = (
+                await session.execute(
+                    select(Role.name, Permission.name)
+                    .join(RolePermission, RolePermission.role_id == Role.id)
+                    .join(Permission, RolePermission.permission_id == Permission.id)
+                )
+            ).all()
+            user_role_count = len((await session.scalars(select(UserRole))).all())
+    finally:
+        await engine.dispose()
+
+    assert role_names == {"visitor", "admin"}
+    # visitor holds nothing; admin holds every supported scope. The six
+    # names are spelled out so a scope added to or dropped from Scope
+    # shows up here as a deliberate test edit.
+    assert sorted(tuple(row) for row in granted) == sorted(
+        ("admin", scope)
+        for scope in (
+            "posts:read",
+            "posts:write",
+            "users:read",
+            "users:write",
+            "admin:read",
+            "admin:write",
+        )
+    )
+    assert user_role_count == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_create_admin_twice_on_an_empty_auth_schema_reports_already_admin(
+    empty_auth_schema: None,
+    cli_email: Callable[[str], str],
+    capsys: pytest.CaptureFixture,
+) -> None:
+    email = cli_email("cli-empty-twice")
+
+    await create_admin(email, "password12345")
+    capsys.readouterr()
+    await create_admin(email, None)
+
+    assert capsys.readouterr().out.strip() == f"{email} is already an admin."
+    assert await _fetch_role_names(email) == ["admin"]
+
+    engine = create_async_engine("kalekit")
+    try:
+        async with create_async_sessionmaker(engine)() as session:
+            assert len((await session.scalars(select(Role))).all()) == 2
+            assert len((await session.scalars(select(RolePermission))).all()) == 6
+            assert len((await session.scalars(select(UserRole))).all()) == 1
+    finally:
+        await engine.dispose()
 
 
 def test_create_admin_parser_requires_email() -> None:
