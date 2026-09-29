@@ -10,6 +10,8 @@ explicitly re-enables it and dials the relevant threshold down so it can
 be exercised in a handful of requests.
 """
 
+import asyncio
+
 import pytest
 import redis.exceptions
 from fastapi import Request
@@ -17,7 +19,11 @@ from httpx import AsyncClient
 
 from kalekit.config import settings
 from kalekit.redis import get_redis
-from kalekit.utils.rate_limit import bounded_identifier, get_client_ip
+from kalekit.utils.rate_limit import (
+    bounded_identifier,
+    check_and_increment,
+    get_client_ip,
+)
 
 
 def _request_with_forwarded_for(value: str | None) -> Request:
@@ -447,3 +453,54 @@ async def test_rate_limited_auth_endpoints_allow_the_request_when_redis_is_down(
         expected = 200
 
     assert response.status_code == expected, response.text
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_parallel_attempts_cannot_get_past_the_account_limit() -> None:
+    """The login account limit relies on `check_and_increment` being
+    atomic: 20 simultaneous attempts against a limit of 3 must let exactly
+    3 through, not all 20 (which a read-then-increment scheme would, since
+    every request would read the old count)."""
+    r = await get_redis()
+
+    results = await asyncio.gather(
+        *(
+            check_and_increment(
+                r, "login_rate:account:race@example.com", limit=3, window_seconds=60
+            )
+            for _ in range(20)
+        )
+    )
+
+    assert results.count(True) == 3
+    assert results.count(False) == 17
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_parallel_wrong_passwords_are_capped_by_the_account_limit(
+    client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end: with a limit of 3, 10 wrong passwords sent at once
+    must not all be answered 401. Exactly 3 reach the password check and
+    the rest get 429."""
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_ACCOUNT", 3)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_IP", 1000)
+
+    await register("parallel-guess@example.com", "correct-password")
+
+    responses = await asyncio.gather(
+        *(
+            client.post(
+                "/v1/auth/login",
+                json={
+                    "email": "parallel-guess@example.com",
+                    "password": f"wrong-{i}",
+                },
+            )
+            for i in range(10)
+        )
+    )
+
+    codes = sorted(r.status_code for r in responses)
+    assert codes == [401] * 3 + [429] * 7

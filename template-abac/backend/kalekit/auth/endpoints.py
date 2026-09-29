@@ -167,23 +167,19 @@ async def login(
             if not ip_allowed:
                 raise rate_limited(await r.ttl(ip_key))
 
-            # Peek (don't increment) the account's failure count -- only an
-            # actual failed attempt below should consume this budget, so a
-            # request that goes on to succeed must not have already spent
-            # a unit of it just by arriving.
-            current_failures = await r.get(account_key)
-            if current_failures:
-                account_ttl = await r.ttl(account_key)
-                if account_ttl == -1:
-                    # Same TTL-recovery check_and_increment does (see
-                    # utils/rate_limit.py) -- this peek path never calls
-                    # it, so a key that lost its expiry would otherwise
-                    # block this account forever instead of resetting
-                    # after the window.
-                    account_ttl = settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS
-                    await r.expire(account_key, account_ttl)
-                if int(current_failures) >= settings.LOGIN_RATE_LIMIT_PER_ACCOUNT:
-                    raise rate_limited(account_ttl)
+            # Count the attempt atomically (INCR) *before* the password is
+            # checked. A read-then-check-then-increment would let a burst
+            # of parallel guesses all read the old count and all get
+            # through. A successful login deletes the counter below, so
+            # only attempts that never succeed accumulate.
+            account_allowed = await check_and_increment(
+                r,
+                account_key,
+                limit=settings.LOGIN_RATE_LIMIT_PER_ACCOUNT,
+                window_seconds=settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
+            )
+            if not account_allowed:
+                raise rate_limited(await r.ttl(account_key))
 
     user = await find_user_by_email(session, body.email)
     password_hash = user.password_hash if user else None
@@ -192,14 +188,6 @@ async def login(
         or not password_hash
         or not verify_password(body.password, password_hash)
     ):
-        if r is not None:
-            with rate_limit_fails_open("login"):
-                await check_and_increment(
-                    r,
-                    account_key,
-                    limit=settings.LOGIN_RATE_LIMIT_PER_ACCOUNT,
-                    window_seconds=settings.LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS,
-                )
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
@@ -207,10 +195,10 @@ async def login(
         raise HTTPException(status_code=403, detail="Email verification required")
 
     if r is not None:
-        # A successful login clears any accumulated failure count for
-        # this account -- the threshold is meant to slow down guessing,
-        # not to keep locking out someone who's now proven they have
-        # the right password.
+        # A successful login clears the attempt count for this account --
+        # the threshold is meant to slow down guessing, not to keep
+        # locking out someone who's now proven they have the right
+        # password.
         with rate_limit_fails_open("login"):
             await r.delete(account_key)
 

@@ -132,8 +132,8 @@ class Settings(BaseSettings):
     # one alone misses the other attack shape.
     LOGIN_RATE_LIMIT_PER_IP: int = 10
     LOGIN_RATE_LIMIT_IP_WINDOW_SECONDS: int = 60
-    # Only failed attempts count against the per-account limit (a
-    # successful login clears the counter).
+    # Attempts are counted before the password check; a successful login
+    # clears the counter, so only attempts that never succeed add up.
     LOGIN_RATE_LIMIT_PER_ACCOUNT: int = 5
     LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS: int = 900  # 15 minutes
 
