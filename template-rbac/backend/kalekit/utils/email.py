@@ -1,10 +1,10 @@
 """Pluggable outbound email.
 
-Email verification and password reset use this today. `ConsoleEmailSender` is the
-default for local/dev/test -- it just logs the message instead of
-sending it, so the kit works out of the box without SMTP credentials.
-Swap `get_email_sender` for a real provider (SES, Postmark, Resend,
-...) before shipping to production.
+Email verification and password reset use this today. `ConsoleEmailSender` is
+used in every environment except production -- it just logs the message
+instead of sending it, so the kit works out of the box without SMTP
+credentials. Swap `get_email_sender` for a real provider (SES, Postmark,
+Resend, ...) before shipping to production.
 """
 
 from __future__ import annotations
@@ -33,7 +33,25 @@ class ConsoleEmailSender(EmailSender):
 
 
 def get_email_sender() -> EmailSender:
-    return ConsoleEmailSender()
+    """Returns the outbound email sender to use.
+
+    `ConsoleEmailSender` in development, testing, preview and staging,
+    where printing the full link -- including its raw, otherwise-secret
+    token -- to the server console instead of delivering it is intended.
+    In production this raises rather than silently falling back to it:
+    doing so would leak verification and password-reset tokens (and any
+    future secrets routed through this module) straight into
+    application logs. Wire up a real provider (SES, Postmark, Resend,
+    ...) here before shipping to production.
+    """
+    if not settings.is_production():
+        return ConsoleEmailSender()
+    raise RuntimeError(
+        "No production EmailSender is configured. ConsoleEmailSender logs "
+        "secrets (e.g. verification and password-reset tokens) and must "
+        "not run in production -- wire up a real provider in "
+        "get_email_sender() before deploying."
+    )
 
 
 async def send_verification_email(*, to: str, token: str) -> None:
