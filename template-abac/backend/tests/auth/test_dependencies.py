@@ -77,13 +77,17 @@ def _make_token(
     iss: str | None = settings.JWT_ISSUER,
     exp_delta: timedelta = timedelta(minutes=15),
     token_type: str = "access",
+    sub: str | None = "user-1",
+    jti: str | None = "jti-1",
 ) -> str:
-    payload = {
-        "sub": "user-1",
-        "jti": "jti-1",
+    payload: dict[str, Any] = {
         "type": token_type,
         "exp": datetime.now(timezone.utc) + exp_delta,
     }
+    if sub is not None:
+        payload["sub"] = sub
+    if jti is not None:
+        payload["jti"] = jti
     if aud is not None:
         payload["aud"] = aud
     if iss is not None:
@@ -286,3 +290,17 @@ def test_decode_rejects_wrong_token_type() -> None:
         _decode_access_token(_credentials(token))
 
     assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("missing", ["jti", "sub"])
+def test_decode_rejects_token_missing_jti_or_sub(missing: str) -> None:
+    """A token without a jti could never be blocked (logout would return
+    204 and leave it usable), and one without a sub identifies no user.
+    Both are refused at decode rather than handled downstream."""
+    token = _make_token(**{missing: None})
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
+    assert exc_info.value.detail == "Invalid token"

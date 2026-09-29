@@ -1,10 +1,14 @@
 from datetime import datetime, timezone
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.dependencies import get_current_user
+from kalekit.auth.blocklist import block_token
+from kalekit.auth.dependencies import get_current_jti, get_current_user
 from kalekit.auth.repository import (
     create_user,
     find_user_by_email,
@@ -35,6 +39,8 @@ from kalekit.models.user import User
 from kalekit.organization.repository import add_member, create_organization
 from kalekit.organization.schemas import OrganizationResponse
 from kalekit.postgres import get_db_session
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -195,9 +201,39 @@ async def refresh(
 @router.post("/logout", status_code=204)
 async def logout(
     user: Annotated[User, Depends(get_current_user)],
+    jti: Annotated[str, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     await revoke_user_refresh_tokens(session, user.id)
+    # Without this, the access token used to call /logout stays valid
+    # for the rest of its natural lifetime -- logging out wouldn't
+    # actually revoke the thing that grants access.
+    try:
+        await block_token(jti)
+    except RedisError:
+        return _revocation_unavailable("logout_block_token_failed")
+
+
+def _revocation_unavailable(event: str) -> JSONResponse:
+    """A clean 503 for a Redis failure while blocking a revoked token
+    (RBAC #108, Hybrid #122).
+
+    Redis is the only home of the access-token blocklist, so when the
+    block can't be written the revoked token would stay usable until it
+    expires. Fail closed: tell the client the sign-out did not complete
+    so it retries. The database revoke that ran just before is
+    idempotent, so a retry is safe.
+
+    Returned rather than raised, on purpose: an HTTPException would run
+    get_db_session's rollback and undo the database revoke, while a
+    normal response lets it commit. Call from inside an `except
+    RedisError` block so the traceback is attached to the log.
+    """
+    logger.warning(event, exc_info=True)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Could not complete sign-out, please try again"},
+    )
 
 
 @router.get("/me", response_model=UserResponse)
