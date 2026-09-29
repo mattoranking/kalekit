@@ -66,15 +66,15 @@ async def test_bounds_come_from_settings(
 
 @pytest.fixture
 def hash_spy(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Records every bcrypt verification (the real one still runs)."""
+    """Records every password verification (the real one still runs)."""
     calls: list[str] = []
-    real = auth_service.pwd_context.verify
+    real = auth_service.password_hash.verify
 
     def _spy(secret: str, hashed: str, *args, **kwargs) -> bool:
         calls.append(secret)
         return real(secret, hashed, *args, **kwargs)
 
-    monkeypatch.setattr(auth_service.pwd_context, "verify", _spy)
+    monkeypatch.setattr(auth_service.password_hash, "verify", _spy)
     return calls
 
 
