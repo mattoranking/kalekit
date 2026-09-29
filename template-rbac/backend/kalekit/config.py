@@ -264,6 +264,12 @@ class Settings(BaseSettings):
 
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
+    # Socket timeouts, in seconds (#157). Without them a Redis that accepts
+    # the connection and never answers hangs every request that touches it;
+    # with them the call raises redis.exceptions.TimeoutError, which the
+    # fail-closed handlers treat like any other RedisError.
+    REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: float = Field(default=1.0, gt=0)
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = Field(default=1.0, gt=0)
 
     # Connection pool settings
     DATABASE_POOL_SIZE: int = 5
