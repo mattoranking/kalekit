@@ -11,14 +11,23 @@ implementation would add here.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 import redis.asyncio as redis
 import structlog
+from fastapi import HTTPException, Request
 from redis.exceptions import RedisError
 
+from kalekit.config import settings
+
 logger = structlog.get_logger()
+
+# RFC 5321's overall length cap on an email address (local-part@domain).
+# Used as the threshold past which a caller-supplied identifier gets
+# hashed before becoming part of a Redis key -- see bounded_identifier.
+MAX_EMAIL_LENGTH = 254
 
 
 @contextmanager
@@ -62,4 +71,74 @@ async def check_and_increment(
     return count <= limit
 
 
-__all__ = ["check_and_increment", "rate_limit_fails_open"]
+def rate_limited(retry_after_seconds: int) -> HTTPException:
+    """A 429 carrying `Retry-After`. `retry_after_seconds` should come
+    from the tripped key's Redis TTL; guarded to at least 1 since a key
+    can (rarely) read back a TTL of 0 or -1 right at expiry/recovery."""
+    retry_after = max(retry_after_seconds, 1)
+    return HTTPException(
+        status_code=429,
+        detail="Too many requests, try again later",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def bounded_identifier(value: str) -> str:
+    """Bounds a caller-supplied string before it becomes part of a
+    Redis key.
+
+    `LoginRequest.email` is a plain `str`, not `EmailStr` -- deliberately,
+    so a malformed login attempt still gets the same uniform 401 instead
+    of a 422 that leaks "this wasn't even shaped like an email" ahead of
+    the password check. That means it has no length cap: without this, a
+    client could submit an arbitrarily large "email" and force creation
+    of a correspondingly large, unbounded-cardinality Redis key on every
+    attempt. A value within the ordinary range (RFC 5321's 254-byte
+    overall email length cap) is used as-is, so normal keys stay
+    human-readable; anything longer is replaced with a fixed-length hash
+    of itself, which still throttles that exact value consistently
+    without letting its size drive Redis memory use.
+    """
+    if len(value) <= MAX_EMAIL_LENGTH:
+        return value
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def get_client_ip(request: Request) -> str:
+    """Best-effort client IP for IP-keyed rate limiting.
+
+    Only trusts the `X-Forwarded-For` header (set by Traefik in front of
+    this API -- see compose.yml) when `settings.TRUST_PROXY_HEADERS` is
+    on. Any client can set that header on a direct connection, so
+    honoring it without a trusted proxy in front would let an attacker
+    spoof a fresh IP on every request and bypass IP-based limiting
+    entirely. Falls back to the ASGI-reported peer address, and to a
+    fixed placeholder if even that is unavailable (e.g. some test
+    transports).
+    """
+    if settings.TRUST_PROXY_HEADERS:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            # The header is a comma-separated list appended to by every
+            # hop; the first entry is the original client as seen by the
+            # nearest trusted proxy. A malformed/empty leading entry
+            # (e.g. ", 1.2.3.4") would otherwise parse as "" and
+            # collapse every such caller onto the same Redis key, so
+            # fall through to the ASGI peer address instead.
+            first_entry = forwarded_for.split(",")[0].strip()
+            if first_entry:
+                return first_entry
+
+    if request.client:
+        return request.client.host
+
+    return "unknown"
+
+
+__all__ = [
+    "bounded_identifier",
+    "check_and_increment",
+    "get_client_ip",
+    "rate_limit_fails_open",
+    "rate_limited",
+]
