@@ -364,18 +364,17 @@ async def test_change_password_blocks_all_revoked_sessions_in_one_redis_write(
 async def test_change_password_redis_failure_is_not_swallowed(
     client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Redis failure while blocking the revoked sessions still surfaces
-    as an error (the exception reaches the ASGI layer, as before this
-    change); it is not silently turned into a 200."""
+    """A Redis failure while blocking the revoked sessions is not
+    silently turned into a 200: it is a clean 503 (#177)."""
     email = "n-plus-one-change-pw-outage@example.com"
     assert (await register(email)).status_code == 201
     current = await _login(client, email)
     await _login(client, email)
 
     count_redis_writes(monkeypatch, fail_when=_is_family_block)
-    with pytest.raises(redis.exceptions.ConnectionError):
-        await client.post(
-            "/v1/auth/change-password",
-            headers={"Authorization": f"Bearer {current}"},
-            json={"current_password": _PASSWORD, "new_password": "newpassword456"},
-        )
+    response = await client.post(
+        "/v1/auth/change-password",
+        headers={"Authorization": f"Bearer {current}"},
+        json={"current_password": _PASSWORD, "new_password": "newpassword456"},
+    )
+    assert response.status_code == 503

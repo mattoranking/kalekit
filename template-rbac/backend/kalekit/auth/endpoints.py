@@ -328,6 +328,12 @@ def _revocation_unavailable(event: str) -> JSONResponse:
     get_db_session's rollback and undo the database revoke, while a
     normal response lets it commit. Call from inside an `except
     RedisError` block so the traceback is attached to the log.
+
+    The commit is the intended outcome on every caller (#177), including
+    change-password and password reset: the new password and the revoked
+    refresh tokens stay in force, so an attacker is locked out of every
+    session that can still mint tokens even while Redis is down. Only
+    access tokens already issued live on, for at most their lifetime.
     """
     logger.warning(event, exc_info=True)
     return JSONResponse(
@@ -550,9 +556,12 @@ async def logout_all(
     # just the one used to call this endpoint -- otherwise another
     # device's still-valid access token would keep working until it
     # naturally expires, even though its refresh token is now dead.
-    await block_all_user_tokens(str(user.id))
-    if jti:
-        await block_token(jti)
+    try:
+        await block_all_user_tokens(str(user.id))
+        if jti:
+            await block_token(jti)
+    except RedisError:
+        return _revocation_unavailable("logout_all_block_failed")
 
 
 @router.get("/sessions", response_model=SessionListResponse)
@@ -601,7 +610,10 @@ async def revoke_session(
     # lifetime unless explicitly blocked -- this is what makes
     # revocation take effect immediately instead of up to
     # ACCESS_TOKEN_EXPIRE_MINUTES later.
-    await block_family_tokens(str(session_id))
+    try:
+        await block_family_tokens(str(session_id))
+    except RedisError:
+        return _revocation_unavailable("revoke_session_block_failed")
 
 
 @router.post("/change-password", response_model=MessageResponse)
@@ -636,7 +648,10 @@ async def change_password(
     revoked_families = await revoke_user_refresh_tokens_except_family(
         session, user.id, keep_family_id
     )
-    await block_families_tokens(str(family_id) for family_id in revoked_families)
+    try:
+        await block_families_tokens(str(family_id) for family_id in revoked_families)
+    except RedisError:
+        return _revocation_unavailable("change_password_block_failed")
 
     if keep_family_id is None:
         # The caller's own access token has no (usable) session id, so
@@ -651,7 +666,10 @@ async def change_password(
         # own token also becomes unusable next call, since we can't
         # tell it apart from the others without a session id -- an
         # acceptable trade next to leaving a live token unrevoked.
-        await block_all_user_tokens(str(user.id))
+        try:
+            await block_all_user_tokens(str(user.id))
+        except RedisError:
+            return _revocation_unavailable("change_password_block_failed")
 
     return MessageResponse(detail="Password changed")
 
@@ -1025,6 +1043,9 @@ async def reset_password(
     # already-minted one doesn't keep working for the rest of its
     # natural lifetime despite its refresh token now being dead.
     await revoke_user_refresh_tokens(session, user.id)
-    await block_all_user_tokens(str(user.id))
+    try:
+        await block_all_user_tokens(str(user.id))
+    except RedisError:
+        return _revocation_unavailable("password_reset_block_failed")
 
     return MessageResponse(detail="Password reset")
