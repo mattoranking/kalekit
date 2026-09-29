@@ -18,6 +18,7 @@ from kalekit.auth.dependencies import (
 )
 from kalekit.auth.permissions import (
     block_all_user_tokens,
+    block_families_tokens,
     block_family_tokens,
     block_token,
     cache_refresh_grace_pair,
@@ -635,8 +636,7 @@ async def change_password(
     revoked_families = await revoke_user_refresh_tokens_except_family(
         session, user.id, keep_family_id
     )
-    for family_id in revoked_families:
-        await block_family_tokens(str(family_id))
+    await block_families_tokens(str(family_id) for family_id in revoked_families)
 
     if keep_family_id is None:
         # The caller's own access token has no (usable) session id, so
