@@ -3,6 +3,7 @@ import uuid
 import pytest
 
 from kalekit.auth.blocklist import block_all_user_tokens, block_token, is_any_blocked
+from kalekit.config import settings
 from kalekit.redis import get_redis
 
 
@@ -70,3 +71,20 @@ async def test_check_is_a_single_redis_round_trip(
 
     assert await is_any_blocked(str(uuid.uuid4()), str(uuid.uuid4())) is False
     assert calls == ["mget"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_block_keys_outlive_the_token_including_leeway() -> None:
+    """The decoder accepts a token until exp + JWT_LEEWAY_SECONDS, and a
+    token can be blocked right after it was minted, so the block key must
+    live for the full lifetime plus the leeway or the token works again
+    before the decoder rejects it."""
+    jti = str(uuid.uuid4())
+    user_id = str(uuid.uuid4())
+    await block_token(jti)
+    await block_all_user_tokens(user_id)
+
+    r = await get_redis()
+    minimum = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60 + settings.JWT_LEEWAY_SECONDS
+    assert await r.ttl(f"blocked_token:{jti}") >= minimum - 1
+    assert await r.ttl(f"blocked_user:{user_id}") >= minimum - 1

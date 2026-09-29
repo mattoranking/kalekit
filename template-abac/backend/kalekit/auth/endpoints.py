@@ -201,18 +201,17 @@ async def refresh(
 @router.post("/logout", status_code=204)
 async def logout(
     user: Annotated[User, Depends(get_current_user)],
-    jti: Annotated[str | None, Depends(get_current_jti)],
+    jti: Annotated[str, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     await revoke_user_refresh_tokens(session, user.id)
     # Without this, the access token used to call /logout stays valid
     # for the rest of its natural lifetime -- logging out wouldn't
     # actually revoke the thing that grants access.
-    if jti:
-        try:
-            await block_token(jti)
-        except RedisError:
-            return _revocation_unavailable("logout_block_token_failed")
+    try:
+        await block_token(jti)
+    except RedisError:
+        return _revocation_unavailable("logout_block_token_failed")
 
 
 def _revocation_unavailable(event: str) -> JSONResponse:

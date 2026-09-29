@@ -15,7 +15,7 @@ request through `is_any_blocked`:
   it yet since those flows don't exist here, but it's wired into
   `get_current_user` so adding one later is a one-line call.
 
-Both use a TTL matching the access token lifetime, since there's no
+Both use a TTL of the access token lifetime plus the JWT leeway, since there's no
 point keeping an entry around after the token it blocks would have
 expired anyway.
 """
@@ -27,14 +27,23 @@ _BLOCKLIST_PREFIX = "blocked_token:"
 _USER_BLOCKLIST_PREFIX = "blocked_user:"
 
 
+def _default_ttl_seconds() -> int:
+    """How long a block must live: the token lifetime plus the decoder's
+    clock-skew leeway. The decoder accepts a token until
+    exp + JWT_LEEWAY_SECONDS, and a token can be blocked right after it
+    was minted, so a TTL of just the lifetime would let a blocked token
+    work again before the decoder rejects it."""
+    return settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60 + settings.JWT_LEEWAY_SECONDS
+
+
 async def block_token(jti: str, ttl_seconds: int | None = None) -> None:
     """Add a token JTI to the blocklist.
 
-    TTL defaults to the access token lifetime so entries
-    auto-expire once the token would have expired anyway.
+    TTL defaults to the access token lifetime plus the JWT leeway, so
+    entries auto-expire once the decoder would reject the token anyway.
     """
     r = await get_redis()
-    ttl = ttl_seconds or settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    ttl = ttl_seconds or _default_ttl_seconds()
     await r.set(f"{_BLOCKLIST_PREFIX}{jti}", "1", ex=ttl)
 
 
@@ -44,10 +53,10 @@ async def block_all_user_tokens(user_id: str) -> None:
     Unlike per-JTI blocking, this covers tokens whose JTI we
     don't know (e.g., compromised account). get_current_user
     checks this flag alongside the per-JTI blocklist.
-    TTL matches access token lifetime.
+    TTL is the same as for block_token.
     """
     r = await get_redis()
-    ttl = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    ttl = _default_ttl_seconds()
     await r.set(f"{_USER_BLOCKLIST_PREFIX}{user_id}", "1", ex=ttl)
 
 

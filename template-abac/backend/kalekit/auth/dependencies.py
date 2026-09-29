@@ -62,7 +62,7 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
             audience=settings.JWT_AUDIENCE,
             issuer=settings.JWT_ISSUER,
             leeway=settings.JWT_LEEWAY_SECONDS,
-            options={"require": ["exp", "aud", "iss"]},
+            options={"require": ["exp", "aud", "iss", "sub", "jti"]},
         )
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -104,10 +104,11 @@ async def get_current_user(
 
 async def get_current_jti(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
-) -> str | None:
+) -> str:
     """The current access token's unique id, for revoking it by itself
-    (e.g. on logout) rather than every token the user holds."""
-    return _decode_access_token(credentials).get("jti")
+    (e.g. on logout) rather than every token the user holds. Always
+    present: _decode_access_token requires it."""
+    return _decode_access_token(credentials)["jti"]
 
 
 async def require_org_member(
