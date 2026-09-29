@@ -7,6 +7,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 type PostgresDriver = Literal["psycopg2", "asyncpg"]
 
+# Placeholder values that ship in config defaults / .env.template / the
+# project generator. None of these are safe to sign tokens with -- anyone
+# who reads this source (or the template) knows them too.
+INSECURE_JWT_SECRETS = {
+    "change-me-in-production",
+    "change_me_in_production",
+    "dev-only-not-secret",
+}
+
+# JWT_SECRET_KEY is used as an HMAC key (HS256). 32 bytes is the minimum
+# recommended key size for HMAC-SHA256 -- shorter keys are brute-forceable.
+MIN_JWT_SECRET_KEY_BYTES = 32
+
+_GENERATE_SECRET_HINT = 'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+
 
 class Environment(StrEnum):
     development = "development"
@@ -168,6 +183,47 @@ class Settings(BaseSettings):
                 "KALEKIT_PASSWORD_MIN_LENGTH must not exceed "
                 "KALEKIT_PASSWORD_MAX_LENGTH"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_jwt_secret_key(self) -> "Settings":
+        """Refuse to start with a known-default or too-short JWT secret.
+
+        Development and testing are exempt so the app still runs out of
+        the box from .env.template / .env.testing without any setup --
+        everywhere else (preview, staging, production), a weak secret
+        would let anyone forge tokens, so we fail fast at startup instead
+        of silently signing with it. JWT_PREVIOUS_KEYS entries get the
+        same check: a rotated-out key still verifies tokens, so a weak
+        one is just as forgeable.
+        """
+        if self.is_environment({Environment.development, Environment.testing}):
+            return self
+
+        keys = {"KALEKIT_JWT_SECRET_KEY": self.JWT_SECRET_KEY}
+        keys.update(
+            {
+                f"KALEKIT_JWT_PREVIOUS_KEYS[{kid!r}]": key
+                for kid, key in self.JWT_PREVIOUS_KEYS.items()
+            }
+        )
+        for name, secret in keys.items():
+            if secret.lower() in INSECURE_JWT_SECRETS:
+                raise ValueError(
+                    f"{name} is set to a known placeholder value "
+                    f"({secret!r}). Set a unique, random secret (32+ bytes) "
+                    f"before starting in a {self.ENV.value} environment -- "
+                    f"generate one with `{_GENERATE_SECRET_HINT}`."
+                )
+
+            secret_bytes = len(secret.encode("utf-8"))
+            if secret_bytes < MIN_JWT_SECRET_KEY_BYTES:
+                raise ValueError(
+                    f"{name} is too short ({secret_bytes} bytes; "
+                    f"minimum {MIN_JWT_SECRET_KEY_BYTES}). Generate one with "
+                    f"`{_GENERATE_SECRET_HINT}`."
+                )
+
         return self
 
     def is_read_replica_configured(self) -> bool:
