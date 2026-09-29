@@ -48,7 +48,9 @@ from kalekit.models.user import User
 from kalekit.organization.repository import add_member, create_organization
 from kalekit.organization.schemas import OrganizationResponse
 from kalekit.postgres import get_db_session
+from kalekit.redis import get_redis
 from kalekit.utils.email import get_email_sender, send_verification_email
+from kalekit.utils.rate_limit import check_and_increment, rate_limit_fails_open
 
 logger = structlog.get_logger()
 
@@ -102,9 +104,10 @@ async def _issue_and_queue_verification_email(
 ) -> None:
     """Persist a fresh verification token and email the link.
 
-    The send is deferred to a background task, which runs after the
-    request's transaction has committed, so the link can never reach the
-    user before its token row is durable.
+    The send is deferred to a background task, the same way invitations
+    are, so it runs after the response is built. FastAPI runs background
+    tasks before the request's session dependency commits, so the email
+    goes out just before the token row is committed.
     """
     assert user.email is not None
     raw_token = generate_verification_token()
@@ -334,6 +337,20 @@ async def resend_verification(
         raise HTTPException(status_code=400, detail="Account has no email address")
 
     get_email_sender()
+
+    with rate_limit_fails_open("resend_verification"):
+        r = await get_redis()
+        allowed = await check_and_increment(
+            r,
+            f"resend_verification_rate:user:{user.id}",
+            limit=settings.RESEND_VERIFICATION_RATE_LIMIT_PER_USER,
+            window_seconds=settings.RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many verification emails, try again later",
+            )
 
     # Open to any authenticated user regardless of require_verified_email:
     # an unverified user still needs a way to request a fresh link.

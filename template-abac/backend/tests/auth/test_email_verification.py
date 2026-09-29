@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -337,3 +338,53 @@ async def test_require_verified_email_dependency_gates_unverified_users() -> Non
         await require_verified_email(unverified)
     assert exc.value.status_code == 403
     assert await require_verified_email(verified) is verified
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_resend_verification_is_rate_limited_per_user(
+    client: AsyncClient,
+    register,
+    login,
+    auth_header,
+    sender: _RecordingSender,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "RESEND_VERIFICATION_RATE_LIMIT_PER_USER", 2)
+    await register("flooder@example.com")
+    token = await login("flooder@example.com")
+    sender.sent.clear()
+
+    statuses = []
+    for _ in range(3):
+        response = await client.post(
+            "/v1/auth/resend-verification", headers=auth_header(token)
+        )
+        statuses.append(response.status_code)
+
+    assert statuses == [200, 200, 429]
+    assert len(sender.sent) == 2
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_resend_verification_limit_fails_open_when_redis_is_down(
+    client: AsyncClient,
+    register,
+    login,
+    auth_header,
+    sender: _RecordingSender,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await register("redis-down@example.com")
+    token = await login("redis-down@example.com")
+    sender.sent.clear()
+
+    async def _broken_redis():
+        raise RedisConnectionError("redis is down")
+
+    monkeypatch.setattr("kalekit.auth.endpoints.get_redis", _broken_redis)
+    response = await client.post(
+        "/v1/auth/resend-verification", headers=auth_header(token)
+    )
+
+    assert response.status_code == 200
+    assert len(sender.sent) == 1

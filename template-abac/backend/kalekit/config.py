@@ -101,6 +101,11 @@ class Settings(BaseSettings):
     # anything beyond profile/resend-verification.
     REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN: bool = False
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
+    # Fixed-window limit on POST /auth/resend-verification, keyed per user
+    # (the caller is authenticated, and what it protects is the mailbox
+    # being flooded, not the endpoint's throughput).
+    RESEND_VERIFICATION_RATE_LIMIT_PER_USER: int = 5
+    RESEND_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS: int = 3600
 
     # Organization invitations
     INVITATION_TOKEN_EXPIRE_HOURS: int = 72
