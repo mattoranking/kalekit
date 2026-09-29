@@ -13,7 +13,7 @@ from typing import Annotated
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from redis.exceptions import RedisError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,12 @@ from kalekit.oauth.repository import (
 )
 from kalekit.postgres import get_db_session
 from kalekit.redis import get_redis
+from kalekit.utils.rate_limit import (
+    check_and_increment,
+    get_client_ip,
+    rate_limit_fails_open,
+    rate_limited,
+)
 
 logger = structlog.get_logger()
 
@@ -54,6 +60,26 @@ def _oauth_unavailable(event: str) -> HTTPException:
     )
 
 
+async def _enforce_oauth_rate_limit(request: Request, endpoint: str) -> None:
+    """Per-IP fixed-window limit shared by both OAuth endpoints, with a
+    separate counter per endpoint. Raises a 429 carrying `Retry-After`;
+    a Redis error inside the limiter lets the request through (the state
+    store below still fails closed on its own)."""
+    if not settings.RATE_LIMIT_ENABLED:
+        return
+    with rate_limit_fails_open(f"oauth_{endpoint}"):
+        r = await get_redis()
+        ip_key = f"oauth_rate:{endpoint}:ip:{get_client_ip(request)}"
+        allowed = await check_and_increment(
+            r,
+            ip_key,
+            limit=settings.OAUTH_RATE_LIMIT_PER_IP,
+            window_seconds=settings.OAUTH_RATE_LIMIT_WINDOW_SECONDS,
+        )
+        if not allowed:
+            raise rate_limited(await r.ttl(ip_key))
+
+
 def _get_provider(provider: str):
     client = OAUTH_PROVIDERS.get(provider)
     if not client:
@@ -62,12 +88,13 @@ def _get_provider(provider: str):
 
 
 @router.get("/{provider}/authorize")
-async def oauth_authorize(provider: str):
+async def oauth_authorize(provider: str, request: Request):
     """Generate an authorization URL and return it to the frontend.
 
     The frontend redirects the user's browser to this URL.
     State is stored in Redis so the callback can validate it.
     """
+    await _enforce_oauth_rate_limit(request, "authorize")
     client = _get_provider(provider)
     state = secrets.token_urlsafe(32)
 
@@ -89,6 +116,7 @@ async def oauth_authorize(provider: str):
 @router.get("/{provider}/callback")
 async def oauth_callback(
     provider: str,
+    request: Request,
     code: Annotated[str, Query()],
     state: Annotated[str, Query()],
     session: Annotated[AsyncSession, Depends(get_db_session)],
@@ -101,6 +129,7 @@ async def oauth_callback(
     4. Find or create a local User + OAuthAccount link
     5. Return our own JWT pair
     """
+    await _enforce_oauth_rate_limit(request, "callback")
     client = _get_provider(provider)
 
     # --- Validate state ---

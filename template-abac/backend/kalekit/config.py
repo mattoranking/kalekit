@@ -123,6 +123,48 @@ class Settings(BaseSettings):
     INVITATION_RATE_LIMIT_PER_ORG: int = 20
     INVITATION_RATE_LIMIT_PER_INVITER: int = 10
 
+    # Rate limiting on the auth endpoints (issue #166, port of RBAC #18).
+    # RATE_LIMIT_ENABLED is the kill switch for the limits below; it is
+    # switched off in .env.testing so the rest of the suite, which logs in
+    # and registers repeatedly from one client IP, doesn't trip them. The
+    # invitation and resend-verification limits above are not covered by
+    # it. A Redis failure lets the request through (see
+    # utils/rate_limit.py).
+    RATE_LIMIT_ENABLED: bool = True
+
+    # Login: limited both by IP (protects against credential stuffing
+    # across many accounts) and by the submitted email (protects one
+    # account against password guessing spread across many IPs) -- either
+    # one alone misses the other attack shape.
+    LOGIN_RATE_LIMIT_PER_IP: int = 10
+    LOGIN_RATE_LIMIT_IP_WINDOW_SECONDS: int = 60
+    # Attempts are counted before the password check; a successful login
+    # clears the counter, so only attempts that never succeed add up.
+    LOGIN_RATE_LIMIT_PER_ACCOUNT: int = 5
+    LOGIN_RATE_LIMIT_ACCOUNT_WINDOW_SECONDS: int = 900  # 15 minutes
+
+    # Registration: per-IP only -- there's no account yet to key on.
+    REGISTER_RATE_LIMIT_PER_IP: int = 5
+    REGISTER_RATE_LIMIT_WINDOW_SECONDS: int = 3600
+
+    # Refresh: keyed per session (refresh token family), not per IP -- a
+    # session legitimately moves across IPs (mobile networks, VPNs), and
+    # the token itself is already the unguessable secret.
+    REFRESH_RATE_LIMIT_PER_SESSION: int = 60
+    REFRESH_RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # OAuth authorize and callback: unauthenticated, so per IP. Each
+    # endpoint has its own counter but they share these two settings.
+    OAUTH_RATE_LIMIT_PER_IP: int = 30
+    OAUTH_RATE_LIMIT_WINDOW_SECONDS: int = 60
+
+    # Only trust `X-Forwarded-For` (set by Traefik -- see compose.yml)
+    # when the API really sits behind a proxy that overwrites it. On a
+    # direct connection any client can send that header and pick a fresh
+    # "IP" per request, dodging IP-based limiting entirely -- so this
+    # defaults to off, and a deployment behind Traefik opts in.
+    TRUST_PROXY_HEADERS: bool = False
+
     # Connection pool settings
     DATABASE_POOL_SIZE: int = 5
     DATABASE_SYNC_POOL_SIZE: int = 1
