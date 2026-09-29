@@ -79,6 +79,19 @@ make fe-typecheck
 make api-client-gen   # regenerate @kalekit/api-client from the running backend
 ```
 
+### OAuth
+
+An OAuth sign-in links to an existing account with the same email only when
+the provider reports the email as verified **and** the existing account's
+email is verified; otherwise the callback returns `409`. Password sign-ups
+start unverified and get an emailed link (`POST /auth/verify-email`,
+`POST /auth/resend-verification`). Unverified users can log in by default;
+set `KALEKIT_REQUIRE_EMAIL_VERIFICATION_BEFORE_LOGIN=true` to refuse login
+until verified, or put the `require_verified_email` dependency on routes that
+need a verified address. Outside production the email is printed to the
+server console (see `utils/email.py`); in production `/auth/register` and the
+other email endpoints fail until a real email sender is wired in.
+
 ## Security headers
 
 The API (`backend/kalekit/security.py`), Traefik (HSTS, HTTPS routers only) and

@@ -1,9 +1,10 @@
 """Pluggable outbound email.
 
-Ported from RBAC #7. Only organization invitations use this today.
-`ConsoleEmailSender` is the default for local/dev/test -- it just logs
-the message instead of sending it, so the kit works out of the box
-without SMTP credentials. Swap `get_email_sender` for a real provider
+Ported from RBAC #7. Organization invitations and email verification use
+this.
+`ConsoleEmailSender` is used in every environment except production -- it
+just logs the message instead of sending it, so the kit works out of the
+box without SMTP credentials. Swap `get_email_sender` for a real provider
 (SES, Postmark, Resend, ...) before shipping to production.
 """
 
@@ -36,22 +37,38 @@ class ConsoleEmailSender(EmailSender):
 def get_email_sender() -> EmailSender:
     """Returns the outbound email sender to use.
 
-    `ConsoleEmailSender` only in dev/test, where logging the full
-    accept-invitation link -- including its raw, otherwise-secret token
-    -- instead of delivering it is the whole point. Outside dev/test
-    this raises rather than silently falling back to it: nothing today
-    stops this function from running in a real deployment, and doing so
-    would leak invitation tokens (and any future secrets routed through
-    this module) straight into application logs. Wire up a real
-    provider (SES, Postmark, Resend, ...) here before shipping.
+    `ConsoleEmailSender` in development, testing, preview and staging,
+    where printing the full link -- including its raw, otherwise-secret
+    token -- to the server console instead of delivering it is intended.
+    In production this raises rather than silently falling back to it:
+    doing so would leak invitation and verification tokens (and any
+    future secrets routed through this module) straight into
+    application logs. Wire up a real provider (SES, Postmark, Resend,
+    ...) here before shipping to production.
     """
-    if settings.is_development() or settings.is_testing():
+    if not settings.is_production():
         return ConsoleEmailSender()
     raise RuntimeError(
         "No production EmailSender is configured. ConsoleEmailSender logs "
-        "secrets (e.g. invitation tokens) and must not run outside "
-        "development/testing -- wire up a real provider in "
+        "secrets (e.g. invitation and verification tokens) and must not "
+        "run in production -- wire up a real provider in "
         "get_email_sender() before deploying."
+    )
+
+
+async def send_verification_email(*, to: str, token: str) -> None:
+    verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
+    sender = get_email_sender()
+    await sender.send(
+        to=to,
+        subject="Verify your email address",
+        body=(
+            "Welcome! Please verify your email address by visiting the "
+            f"link below:\n\n{verify_url}\n\n"
+            "This link expires in "
+            f"{settings.EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS} hours and can "
+            "only be used once."
+        ),
     )
 
 
@@ -93,4 +110,5 @@ __all__ = [
     "EmailSender",
     "get_email_sender",
     "send_invitation_email",
+    "send_verification_email",
 ]

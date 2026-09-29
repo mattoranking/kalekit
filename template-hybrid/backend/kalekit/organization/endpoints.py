@@ -274,7 +274,7 @@ async def create_organization_invitation(
 
     # Called here, synchronously, purely to surface a misconfigured
     # deployment as a request-time failure -- `get_email_sender` raises
-    # outside dev/test when no real provider is wired up. Left to raise
+    # in production when no real provider is wired up. Left to raise
     # only from inside the `BackgroundTasks` callback below (which runs
     # after this response has already been sent), the caller would see
     # a normal 202 "invitation sent" while the email silently never
