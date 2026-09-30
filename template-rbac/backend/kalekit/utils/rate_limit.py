@@ -111,20 +111,29 @@ def get_client_ip(request: Request) -> str:
     transports) -- rate limiting is disabled by default in tests
     (`settings.RATE_LIMIT_ENABLED`), so that placeholder never needs to
     distinguish real callers.
+
+    Even with the header trusted, a proxy that passes a client-supplied
+    `X-Forwarded-For` through and appends to it leaves the client's
+    value at the left, so the first entry would let an attacker pick a
+    fresh key per request (#210). Each trusted proxy appends the address
+    it saw to the right, so the entry `settings.TRUSTED_PROXY_HOPS`
+    places from the right is the one the nearest trusted proxy recorded.
     """
     if settings.TRUST_PROXY_HEADERS:
-        forwarded_for = request.headers.get("x-forwarded-for")
-        if forwarded_for:
-            # The header is a comma-separated list appended to by every
-            # hop; the first entry is the original client as seen by the
-            # nearest trusted proxy. A malformed/empty leading entry
-            # (e.g. ", 1.2.3.4") would otherwise parse as "" and
-            # collapse every such caller onto the same Redis key --
-            # round-3 Copilot finding on PR #88 -- so fall through to
-            # the ASGI peer address instead of returning that blindly.
-            first_entry = forwarded_for.split(",")[0].strip()
-            if first_entry:
-                return first_entry
+        # Repeated header lines are one list (RFC 9110); `headers.get`
+        # would return only the first line, which the client controls.
+        forwarded_for = ",".join(request.headers.getlist("x-forwarded-for"))
+        entries = forwarded_for.split(",")
+        hops = settings.TRUSTED_PROXY_HOPS
+        if len(entries) >= hops:
+            # Positions count empty entries too, so a client can't shift
+            # which entry is trusted by padding the header. An empty or
+            # blank trusted entry (e.g. "1.2.3.4, ") would collapse every
+            # such caller onto one Redis key -- round-3 Copilot finding on
+            # PR #88 -- so fall through to the ASGI peer address instead.
+            trusted_entry = entries[-hops].strip()
+            if trusted_entry:
+                return trusted_entry
 
     if request.client:
         return request.client.host

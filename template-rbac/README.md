@@ -136,8 +136,11 @@ Environment to override it.
 The deploys also give the backend a Redis container on the internal Docker
 network (no published port) at `redis://redis:6379/0`, and set
 `KALEKIT_TRUST_PROXY_HEADERS=true` because the API only receives traffic
-through Traefik. Neither needs a secret. The workflows do not print container
-logs; read them on the host over SSH.
+through Traefik. Neither needs a secret. `KALEKIT_TRUSTED_PROXY_HOPS` (default
+1) is how many proxies append to `X-Forwarded-For`; the API takes the entry that
+many places from the right, so the default fits one Traefik in front and a
+client-supplied header can't choose the rate-limit key. The workflows do not
+print container logs; read them on the host over SSH.
 
 ## License
 
