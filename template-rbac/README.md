@@ -152,6 +152,18 @@ staging: `staging-backend-<first 6 chars of the commit sha>`, the container the
 blue-green step starts with `docker compose run`). Previews rely on
 `docker compose up --wait`, which waits for the container healthcheck.
 
+Production rollback. The deploy writes `.version.switched` in
+`/home/deploy/opt/kalekit/production` just before it replaces the backend
+container, and the health check writes `.version.healthy` only after it
+passes. If the job fails, `Rollback on failure` does nothing unless this run
+wrote the switch marker, because otherwise the running backend was never
+replaced. If it did switch, the step puts the last healthy version back in
+`.env`, pulls that image and recreates the backend. It logs which case
+applied. When no healthy version is recorded (for example the first deploy on a
+host, or a host deployed before this change) or the last healthy version is the
+one that just failed, it logs that it did not roll back and leaves the backend
+as it is. The `.version` and `.version.previous` files are no longer used.
+
 CI and the staging `test-backend` job start a Redis service and set
 `KALEKIT_REDIS_URL` to `redis://localhost:6379/15`; the suite refuses Redis
 db 0.

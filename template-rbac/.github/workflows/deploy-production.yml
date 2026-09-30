@@ -100,13 +100,14 @@ jobs:
           CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
           API_DOMAIN: ${{ secrets.API_DOMAIN }}
           DEPLOY_VERSION: ${{ needs.build-and-push.outputs.version }}
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
           JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
           JWT_ISSUER: ${{ vars.JWT_ISSUER || 'kalekit-production' }}
         with:
           host: ${{ secrets.PRODUCTION_HOST }}
           username: ${{ secrets.PRODUCTION_USER }}
           key: ${{ secrets.PRODUCTION_SSH_KEY }}
-          envs: BACKEND_IMG,CR_PAT,GH_ACTOR,DB_USER,DB_PASSWORD,GEMINI_API_KEY,CORS_ORIGINS,API_DOMAIN,DEPLOY_VERSION,JWT_SECRET_KEY,JWT_ISSUER
+          envs: BACKEND_IMG,CR_PAT,GH_ACTOR,DB_USER,DB_PASSWORD,GEMINI_API_KEY,CORS_ORIGINS,API_DOMAIN,DEPLOY_VERSION,DEPLOY_RUN,JWT_SECRET_KEY,JWT_ISSUER
           script: |
             set -e
 
@@ -178,11 +179,14 @@ jobs:
             APP_DIR=/home/deploy/opt/kalekit/production
             mkdir -p $APP_DIR && cd $APP_DIR
 
-            # Save current version for potential rollback
-            if [ -f .version ]; then
-              cp .version .version.previous
-            fi
-            echo "${DEPLOY_VERSION}" > .version
+            # Rollback state, in this directory:
+            #   .version.healthy   last version whose health check passed
+            #                      (written by the "Health check" step)
+            #   .version.switched  "<run>:<version>", written just before the
+            #                      backend container is replaced
+            # Clear this run's switch marker so a marker left by an earlier
+            # deploy can never make the rollback step think we switched.
+            rm -f .version.switched
 
             # Write docker-compose file
             cat > docker-compose.yml <<'COMPOSE'
@@ -302,6 +306,8 @@ jobs:
             # Pull and deploy
             docker compose pull backend
             docker compose up -d --wait db redis
+            # From here on the live backend is replaced: record that first.
+            echo "${DEPLOY_RUN}:${DEPLOY_VERSION}" > .version.switched
             docker compose up -d --force-recreate backend
 
             # Cleanup unused images older than 7 days
@@ -312,10 +318,13 @@ jobs:
 
       - name: Health check
         uses: appleboy/ssh-action@v1.0.0
+        env:
+          DEPLOY_VERSION: ${{ needs.build-and-push.outputs.version }}
         with:
           host: ${{ secrets.PRODUCTION_HOST }}
           username: ${{ secrets.PRODUCTION_USER }}
           key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          envs: DEPLOY_VERSION
           script: |
             # The backend only `expose`s port 8000 (Traefik reaches it over
             # the Docker network) and publishes no host port, so 127.0.0.1:8000
@@ -325,6 +334,9 @@ jobs:
             for i in 1 2 3 4 5; do
               if docker exec kalekit_backend_prod python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
                 echo "Production backend is healthy!"
+                # Only a version that passed the check becomes a rollback target.
+                echo "${DEPLOY_VERSION}" > /home/deploy/opt/kalekit/production/.version.healthy
+                echo "Recorded ${DEPLOY_VERSION} as the last healthy version"
                 exit 0
               fi
               echo "Attempt $i/5 failed, retrying in 10s..."
@@ -334,7 +346,10 @@ jobs:
             exit 1
 
       # Skipped when the JWT secret check fails: nothing was changed, so the
-      # live backend keeps running as it is.
+      # live backend keeps running as it is. It also does nothing when this
+      # run failed before it replaced the backend container (no switch
+      # marker for this run). Otherwise it goes back to the last version that
+      # passed a health check, not to whatever ran before this deploy.
       - name: Rollback on failure
         if: failure() && steps.jwt_check.outcome == 'success'
         uses: appleboy/ssh-action@v1.0.0
@@ -342,34 +357,51 @@ jobs:
           BACKEND_IMG_BASE: ${{ needs.build-and-push.outputs.backend_image }}
           CR_PAT: ${{ secrets.CR_PAT }}
           GH_ACTOR: ${{ github.actor }}
+          DEPLOY_VERSION: ${{ needs.build-and-push.outputs.version }}
+          DEPLOY_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
         with:
           host: ${{ secrets.PRODUCTION_HOST }}
           username: ${{ secrets.PRODUCTION_USER }}
           key: ${{ secrets.PRODUCTION_SSH_KEY }}
-          envs: BACKEND_IMG_BASE,CR_PAT,GH_ACTOR
+          envs: BACKEND_IMG_BASE,CR_PAT,GH_ACTOR,DEPLOY_VERSION,DEPLOY_RUN
           script: |
-            cd /home/deploy/opt/kalekit/production
+            cd /home/deploy/opt/kalekit/production || {
+              echo "Rollback skipped: no production directory on the host; nothing was changed"
+              exit 0
+            }
 
-            if [ -f .version.previous ]; then
-              PREV=$(cat .version.previous)
-              echo "Rolling back to $PREV..."
-
-              echo "${CR_PAT}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
-
-              # docker-compose.yml uses ${BACKEND_IMG}, which comes from .env,
-              # so the previous image tag goes in .env.
-              sed -i "s|^BACKEND_IMG=.*|BACKEND_IMG=${BACKEND_IMG_BASE}:${PREV}|" .env
-              grep -q "^BACKEND_IMG=${BACKEND_IMG_BASE}:${PREV}\$" .env || {
-                echo "ERROR: could not set BACKEND_IMG in .env; rollback not applied"
-                exit 1
-              }
-
-              docker compose pull backend
-              docker compose up -d --force-recreate backend
-              echo "Rollback to $PREV complete"
-            else
-              echo "No previous version found for rollback"
+            if [ "$(cat .version.switched 2>/dev/null)" != "${DEPLOY_RUN}:${DEPLOY_VERSION}" ]; then
+              echo "Rollback skipped: ${DEPLOY_VERSION} never replaced the running backend; nothing was changed"
+              exit 0
             fi
+
+            if [ ! -s .version.healthy ]; then
+              echo "Rollback NOT done: no last healthy version is recorded; the failed ${DEPLOY_VERSION} is still running"
+              exit 0
+            fi
+            HEALTHY=$(cat .version.healthy)
+
+            if [ "$HEALTHY" = "${DEPLOY_VERSION}" ]; then
+              echo "Rollback NOT done: the last healthy version is ${DEPLOY_VERSION} itself; there is nothing older to go back to"
+              exit 0
+            fi
+
+            echo "Rolling back from ${DEPLOY_VERSION} to last healthy version ${HEALTHY}..."
+
+            echo "${CR_PAT}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
+
+            # docker-compose.yml uses ${BACKEND_IMG}, which comes from .env,
+            # so the healthy image tag goes in .env.
+            sed -i "s|^BACKEND_IMG=.*|BACKEND_IMG=${BACKEND_IMG_BASE}:${HEALTHY}|" .env
+            grep -q "^BACKEND_IMG=${BACKEND_IMG_BASE}:${HEALTHY}\$" .env || {
+              echo "ERROR: could not set BACKEND_IMG in .env; rollback not applied"
+              exit 1
+            }
+
+            docker compose pull backend
+            docker compose up -d --force-recreate backend
+            rm -f .version.switched
+            echo "Rollback to ${HEALTHY} complete"
 
   create-release:
     name: Create GitHub Release
