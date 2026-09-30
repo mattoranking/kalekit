@@ -264,8 +264,8 @@ async def test_reset_password_revokes_existing_sessions(
     )
     assert refresh_response.status_code == 401
 
-    # The old access token no longer authenticates either -- it was
-    # blanket-blocked, not just left to expire naturally.
+    # The old access token no longer authenticates either -- the reset
+    # bumped the user's token version.
     me_response = await client.get(
         "/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"}
     )

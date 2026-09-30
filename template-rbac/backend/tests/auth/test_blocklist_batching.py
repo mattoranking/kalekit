@@ -1,12 +1,12 @@
-"""is_any_blocked batches the jti/user/family blocklist checks that
+"""is_any_blocked batches the jti/family blocklist checks that
 get_current_user runs on every authenticated request into a single
-Redis round-trip instead of three sequential ones -- see #94.
+Redis round-trip instead of sequential ones -- see #94.
 
 These tests spy on the actual redis client's call count (never on
-wall-clock timing, per the issue's own acceptance criteria). With all
-three ids present, every one of the 8 subsets of {jti, user, family}
-that could independently be blocked is covered; a couple of missing-id
-edge cases (all absent, only jti present) are covered separately.
+wall-clock timing, per the issue's own acceptance criteria). With both
+ids present, every one of the 4 subsets of {jti, family} that could
+independently be blocked is covered; a couple of missing-id edge cases
+(all absent, only jti present) are covered separately.
 get_current_user itself is also checked end-to-end to confirm it only
 issues one round-trip.
 """
@@ -15,7 +15,6 @@ import pytest
 from httpx import AsyncClient
 
 from kalekit.auth.permissions import (
-    block_all_user_tokens,
     block_family_tokens,
     block_token,
     get_redis,
@@ -65,44 +64,29 @@ async def _spy_on_mget(
     [
         frozenset(),
         frozenset({"jti"}),
-        frozenset({"user"}),
         frozenset({"family"}),
-        frozenset({"jti", "user"}),
         frozenset({"jti", "family"}),
-        frozenset({"user", "family"}),
-        frozenset({"jti", "user", "family"}),
     ],
-    ids=[
-        "none-blocked",
-        "jti-only",
-        "user-only",
-        "family-only",
-        "jti-and-user",
-        "jti-and-family",
-        "user-and-family",
-        "all-three",
-    ],
+    ids=["none-blocked", "jti-only", "family-only", "both"],
 )
 async def test_is_any_blocked_covers_every_combination_of_blocked_ids(
     monkeypatch: pytest.MonkeyPatch,
     blocked: frozenset[str],
 ) -> None:
-    """With all three ids present on the token, every one of the 8
-    subsets of {jti, user, family} that could independently be blocked
-    must still resolve correctly (True iff at least one of the
-    *blocked* ones is in the subset) in exactly one Redis round-trip.
+    """With both ids present on the token, every one of the 4 subsets of
+    {jti, family} that could independently be blocked must resolve
+    correctly (True iff at least one is blocked) in exactly one Redis
+    round-trip.
     """
-    jti, user_id, family_id = "jti-x", "user-x", "family-x"
+    jti, family_id = "jti-x", "family-x"
     if "jti" in blocked:
         await block_token(jti)
-    if "user" in blocked:
-        await block_all_user_tokens(user_id)
     if "family" in blocked:
         await block_family_tokens(family_id)
 
     spy = await _spy_on_mget(monkeypatch)
 
-    result = await is_any_blocked(jti, user_id, family_id)
+    result = await is_any_blocked(jti, family_id)
 
     assert result is (len(blocked) > 0)
     assert spy.await_count == 1
@@ -112,14 +96,14 @@ async def test_is_any_blocked_covers_every_combination_of_blocked_ids(
 async def test_is_any_blocked_skips_none_ids_rather_than_treating_them_as_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A missing jti/user_id/sid must simply not be checked -- same as
+    """A missing jti/sid must simply not be checked -- same as
     the `if jti and ...` guards this replaces -- not spuriously counted
     as blocked or not blocked either way. With every id absent, there is
     nothing to check at all, so no Redis round-trip should happen
     either (asserted below via the spy's call count)."""
     spy = await _spy_on_mget(monkeypatch)
 
-    result = await is_any_blocked(None, None, None)
+    result = await is_any_blocked(None, None)
 
     assert result is False
     assert spy.await_count == 0
@@ -132,7 +116,7 @@ async def test_is_any_blocked_with_only_jti_present_does_one_round_trip(
     await block_token("jti-6")
     spy = await _spy_on_mget(monkeypatch)
 
-    result = await is_any_blocked("jti-6", None, None)
+    result = await is_any_blocked("jti-6", None)
 
     assert result is True
     assert spy.await_count == 1
@@ -148,7 +132,7 @@ async def test_get_current_user_hits_redis_once_for_a_valid_token(
 ) -> None:
     """End-to-end: authenticating a request via get_current_user must
     cost exactly one mget round-trip for the blocklist checks, not
-    three separate EXISTS calls."""
+    separate EXISTS calls."""
     await register("batching@example.com")
     await promote_to_admin("batching@example.com")
     login_response = await client.post(

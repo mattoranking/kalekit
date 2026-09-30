@@ -198,26 +198,13 @@ async def block_token(jti: str, ttl_seconds: int | None = None) -> None:
     await r.set(f"{_BLOCKLIST_PREFIX}{jti}", "1", ex=ttl)
 
 
-async def block_all_user_tokens(user_id: str) -> None:
-    """Flag a user so get_current_user rejects any access token.
-
-    Unlike per-JTI blocking, this covers tokens whose JTI we
-    don't know (e.g., compromised account). get_current_user
-    checks this flag alongside the per-JTI blocklist.
-    TTL is the same as for block_token.
-    """
-    r = await get_redis()
-    ttl = _default_ttl_seconds()
-    await r.set(f"blocked_user:{user_id}", "1", ex=ttl)
-
-
 async def block_family_tokens(family_id: str, ttl_seconds: int | None = None) -> None:
     """Flag a single session (token family) so get_current_user rejects
     any access token minted under it -- even ones whose jti we don't
     know. Access tokens carry the family_id that minted them as the
     `sid` claim (see create_access_token), which is what lets this be
-    scoped to one session instead of blocking every session the user
-    has the way block_all_user_tokens does. Used when a specific
+    scoped to one session instead of every session the user has.
+    Used when a specific
     session is revoked (DELETE /auth/sessions/{id}) or when other
     sessions are killed on password change while the current one is
     kept. TTL is the same as for block_token.
@@ -247,24 +234,22 @@ async def block_families_tokens(
         await pipe.execute()
 
 
-async def is_any_blocked(
-    jti: str | None, user_id: str | None, family_id: str | None
-) -> bool:
-    """Combined jti/user/family blocklist check in a single Redis
-    round-trip, for get_current_user's hot path (see #94).
+async def is_any_blocked(jti: str | None, family_id: str | None) -> bool:
+    """Combined jti/family blocklist check in a single Redis round-trip,
+    for get_current_user's hot path (see #94).
 
-    Checks whether the token's JTI, the user, or the token's family has
-    been blocked, but instead of three sequential `EXISTS` round-trips
-    it issues one `MGET` across whichever of the three keys apply. An
-    id that's None (absent from the token) is simply not checked --
-    same as the `if jti and ...` guards this replaces at the call
-    site -- rather than treated as blocked or not blocked either way.
+    Checks whether the token's JTI or the token's family has been
+    blocked, but instead of two sequential `EXISTS` round-trips it
+    issues one `MGET` across whichever of the two keys apply. An id
+    that's None (absent from the token) is simply not checked rather
+    than treated as blocked or not blocked either way.
+
+    There is no user-wide key: "sign out everywhere" is the
+    `users.token_version` cut-off in get_current_user (#195, #229).
     """
     keys = []
     if jti:
         keys.append(f"{_BLOCKLIST_PREFIX}{jti}")
-    if user_id:
-        keys.append(f"blocked_user:{user_id}")
     if family_id:
         keys.append(f"blocked_family:{family_id}")
 
