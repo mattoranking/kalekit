@@ -1,10 +1,10 @@
 from collections.abc import AsyncGenerator
 from typing import Callable, Coroutine
-from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient, Response
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -17,6 +17,22 @@ from kalekit.config import settings
 from kalekit.models import Model  # noqa: F401 -- registers all models
 
 
+def assert_not_redis_db_0(redis: Redis) -> None:
+    """Refuse to let the test suite flush Redis db 0.
+
+    Db 0 is the index the dev app uses (it holds the logged-out-token
+    blocklist). .env.testing points tests at a dedicated index; this
+    fails loudly if something overrides it back. It checks the index the
+    client will actually use, not the URL text, because redis-py accepts
+    URL forms (`/0/`, `/15?db=0`, `unix://...`) that a text check misses.
+    """
+    db = redis.connection_pool.connection_kwargs.get("db", 0)
+    assert int(db) != 0, (
+        "tests would flush Redis db 0; set KALEKIT_REDIS_URL to a "
+        "dedicated test index (see .env.testing)"
+    )
+
+
 @pytest_asyncio.fixture(loop_scope="session", autouse=True)
 async def clear_redis() -> AsyncGenerator[None]:
     """Redis isn't part of the per-test Postgres rollback below, so a
@@ -27,15 +43,8 @@ async def clear_redis() -> AsyncGenerator[None]:
     """
     from kalekit.auth.permissions import get_redis
 
-    # Never flush Redis db 0: that is the index the dev app uses (and it
-    # holds its logged-out-token blocklist). .env.testing points tests at
-    # a dedicated index; refuse to run if something overrides it back.
-    db = urlparse(settings.REDIS_URL).path.lstrip("/") or "0"
-    assert db != "0", (
-        "tests would flush Redis db 0; set KALEKIT_REDIS_URL to a "
-        "dedicated test index (see .env.testing)"
-    )
     redis = await get_redis()
+    assert_not_redis_db_0(redis)
     await redis.flushdb()
     yield
 
