@@ -93,6 +93,52 @@ Backend deploys to DigitalOcean via `.github/workflows/deploy-*.yml`
 Frontend CD is not wired — decide per surface (container vs Vercel).
 Mobile: `eas init`, then EAS Build / EAS Update.
 
+### GitHub Environment secrets and variables
+
+Each workflow deploys through a GitHub Environment (`test`, `staging`,
+`production`; Settings > Environments). Set these before the next deploy.
+Set every value per Environment; do not reuse one across environments.
+
+| Name | Kind | `test` (preview) | `staging` | `production` |
+|---|---|---|---|---|
+| `JWT_SECRET_KEY` | secret, **required** | yes | yes | yes |
+| `JWT_ISSUER` | variable, optional | default `kalekit-preview` | default `kalekit-staging` | default `kalekit-production` |
+| `CR_PAT` | secret | yes | yes | yes |
+| `GEMINI_API_KEY` | secret | yes | yes | yes |
+| `ACME_EMAIL` | secret | yes | yes | not used |
+| `STAGING_HOST`, `STAGING_USER`, `STAGING_SSH_KEY` | secret | yes | yes | not used |
+| `PRODUCTION_HOST`, `PRODUCTION_USER`, `PRODUCTION_SSH_KEY` | secret | not used | not used | yes |
+| `GH_ACTOR` | secret | yes | not used | not used |
+| `TEST_DB_PASSWORD` | secret | yes | not used | not used |
+| `KALEKIT_POSTGRES_USER`, `KALEKIT_POSTGRES_PWD`, `KALEKIT_POSTGRES_STAGING_DATABASE` | secret | not used | yes | not used |
+| `STAGING_API_DOMAIN`, `CORS_ORIGINS` | secret | not used | yes | not used |
+| `DB_USER`, `DB_PASSWORD`, `API_DOMAIN`, `CORS_ORIGINS` | secret | not used | not used | yes |
+
+The preview cleanup job in `deploy-test.yml` runs without an Environment, so
+`STAGING_HOST`, `STAGING_USER` and `STAGING_SSH_KEY` must also exist as
+repository secrets.
+
+`JWT_SECRET_KEY` signs access tokens. The backend refuses to start in
+preview, staging and production if it is a placeholder or shorter than 32
+bytes. Each deploy stops before writing any configuration if it is missing
+or shorter than 32 characters; in production the `Rollback on failure` step
+still runs after that and recreates the backend from the previous
+configuration. Generate one per environment:
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+`JWT_ISSUER` is stamped on every token and checked on decode. Leave it unset to
+use the per-environment default above, or set a variable of that name on the
+Environment to override it.
+
+The deploys also give the backend a Redis container on the internal Docker
+network (no published port) at `redis://redis:6379/0`, and set
+`KALEKIT_TRUST_PROXY_HEADERS=true` because the API only receives traffic
+through Traefik. Neither needs a secret. The workflows do not print container
+logs; read them on the host over SSH.
+
 ## License
 
 MIT

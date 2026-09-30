@@ -130,13 +130,23 @@ jobs:
           TEST_DB_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          JWT_ISSUER: ${{ vars.JWT_ISSUER || 'kalekit-preview' }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          envs: SLUG,SHORT_SHA,BACKEND_IMG,CR_PAT,GH_ACTOR,TEST_DB_PASSWORD,GEMINI_API_KEY,ACME_EMAIL
+          envs: SLUG,SHORT_SHA,BACKEND_IMG,CR_PAT,GH_ACTOR,TEST_DB_PASSWORD,GEMINI_API_KEY,ACME_EMAIL,JWT_SECRET_KEY,JWT_ISSUER
           script: |
             set -e
+
+            # Fail before touching anything if the JWT secret is missing or
+            # too short: the backend refuses to start outside development and
+            # testing with a weak secret. The value is never printed.
+            if [ "${#JWT_SECRET_KEY}" -lt 32 ]; then
+              echo "ERROR: the JWT_SECRET_KEY environment secret is missing or shorter than 32 characters"
+              exit 1
+            fi
 
             # ---- Ensure shared Traefik is running ----
             TRAEFIK_DIR=/home/deploy/opt/kalekit/traefik
@@ -245,6 +255,21 @@ jobs:
                   timeout: 5s
                   retries: 5
 
+              redis:
+                image: redis:7-alpine
+                container_name: kalekit_redis_preview_${SLUG}
+                command: ["redis-server", "--appendonly", "yes"]
+                volumes:
+                  - redis_data:/data
+                networks:
+                  - internal
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD", "redis-cli", "ping"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
               backend:
                 image: ${BACKEND_IMG}
                 container_name: kalekit_backend_preview_${SLUG}
@@ -257,11 +282,17 @@ jobs:
                   KALEKIT_POSTGRES_DATABASE: kalekit_preview_${SLUG}
                   KALEKIT_CORS_ORIGINS: https://${SLUG}.test.kalekit.one
                   KALEKIT_ALLOWED_HOSTS: ${SLUG}.test-api.kalekit.one,localhost,127.0.0.1
+                  KALEKIT_JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+                  KALEKIT_JWT_ISSUER: ${JWT_ISSUER}
+                  KALEKIT_REDIS_URL: redis://redis:6379/0
+                  KALEKIT_TRUST_PROXY_HEADERS: "true"
                   GEMINI_API_KEY: ${GEMINI_API_KEY}
                 expose:
                   - "8000"
                 depends_on:
                   db:
+                    condition: service_healthy
+                  redis:
                     condition: service_healthy
                 networks:
                   - internal
@@ -286,6 +317,7 @@ jobs:
 
             volumes:
               postgres_data:
+              redis_data:
 
             networks:
               internal:
@@ -294,11 +326,14 @@ jobs:
                 external: true
             COMPOSE
 
-            # Write .env file
+            # Write .env file (owner-readable only; it holds secrets)
+            install -m 600 /dev/null .env
             cat > .env <<EOF
             SLUG=${SLUG}
             TEST_DB_PASSWORD=${TEST_DB_PASSWORD}
             GEMINI_API_KEY=${GEMINI_API_KEY}
+            JWT_SECRET_KEY=${JWT_SECRET_KEY}
+            JWT_ISSUER=${JWT_ISSUER}
             BACKEND_IMG=${BACKEND_IMG}
             EOF
 
