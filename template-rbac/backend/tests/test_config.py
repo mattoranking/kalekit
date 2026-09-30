@@ -78,6 +78,37 @@ def test_non_dev_environments_accept_strong_secret(env: Environment) -> None:
     assert settings.JWT_SECRET_KEY == "s" * 32
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        Environment.preview,
+        Environment.staging,
+        Environment.production,
+    ],
+)
+def test_rejected_error_does_not_echo_settings_secrets(env: Environment) -> None:
+    """pydantic appends `input_value=<settings dict>` to validation errors,
+    truncated to its head and tail, and the tail is whichever fields sit
+    last in the dict. Here that is the OAuth client secret, so a secret
+    that is not the rejected one would still end up in deploy logs.
+    """
+    oauth_secret = "tw-client-secret-Zx81QpLm9Vc4"
+
+    with pytest.raises(ValueError) as excinfo:
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            ENV=env,
+            JWT_SECRET_KEY="Rk9vQmFyQmF6UXV4MTIzNDU2",  # 24 bytes: too short
+            TWITTER_CLIENT_SECRET=oauth_secret,
+        )
+
+    message = str(excinfo.value)
+    assert "too short" in message
+    # pydantic truncates the echoed value, so look for its tail end.
+    assert oauth_secret[-12:] not in message
+    assert "input_value" not in message
+
+
 # --- Per-client token/session policy (see #6) -------------------------
 
 
