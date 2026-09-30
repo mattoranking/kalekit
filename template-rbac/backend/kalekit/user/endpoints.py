@@ -14,8 +14,13 @@ from kalekit.auth.repository import (
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.user.repository import get_user_by_id, get_users, update_user
-from kalekit.user.schemas import UserListResponse, UserResponse, UserUpdate
-from kalekit.user.service import ensure_not_last_active_admin
+from kalekit.user.schemas import (
+    UserListResponse,
+    UserResponse,
+    UserRolesUpdate,
+    UserUpdate,
+)
+from kalekit.user.service import change_user_roles, ensure_not_last_active_admin
 from kalekit.user.sorting import DEFAULT_USER_SORT, UserSort
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -147,4 +152,35 @@ async def patch_user(
         # (#195).
         await bump_token_version(session, user)
         await revoke_user_refresh_tokens(session, user.id)
+    return _user_response(user)
+
+
+@router.put(
+    "/{user_id}/roles",
+    response_model=UserResponse,
+    summary="Replace the roles a user holds",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {"schema": UserRolesUpdate.model_json_schema()}
+            },
+        }
+    },
+)
+async def put_user_roles(
+    user_id: uuid.UUID,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
+    caller: Annotated[User, Depends(require_admin_permission("roles:write"))],
+) -> UserResponse:
+    # The body is read after the admin guard, as in patch_user (#222).
+    try:
+        body = UserRolesUpdate.model_validate_json(await request.body())
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+    user = await change_user_roles(
+        session, caller=caller, user_id=user_id, role_names=set(body.roles)
+    )
     return _user_response(user)

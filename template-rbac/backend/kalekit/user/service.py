@@ -1,10 +1,33 @@
+import uuid
+
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from kalekit.auth.repository import bump_token_version
 from kalekit.auth.seed import ADMIN_ROLE
 from kalekit.models.role import Role, UserRole
 from kalekit.models.user import User
+from kalekit.user.repository import get_roles_by_name, get_user_by_id
+
+# Key of the Postgres advisory lock that serialises every change to who is
+# an active admin (arbitrary constant, unique to this lock).
+_ADMIN_CHANGE_LOCK_KEY = 7_234_001
+
+
+async def lock_admin_changes(session: AsyncSession) -> None:
+    """Wait for, then hold until the transaction ends, the lock that every
+    change to who is an active admin must take.
+
+    Row locks are not enough here. A role change deletes a `user_roles`
+    row and a suspension updates a `users` row, and Postgres re-checks
+    only the rows a waiting query locked, so a second request that waited
+    on the first still counts the admin role row the first one deleted. One
+    lock for all of them makes the second request start its reads only
+    after the first has committed. Reads made after this call see the
+    committed state (READ COMMITTED takes a new snapshot per statement).
+    """
+    await session.execute(select(func.pg_advisory_xact_lock(_ADMIN_CHANGE_LOCK_KEY)))
 
 
 async def ensure_not_last_active_admin(session: AsyncSession, user: User) -> None:
@@ -12,21 +35,19 @@ async def ensure_not_last_active_admin(session: AsyncSession, user: User) -> Non
     role, so a change that takes the role or the account away from them
     would leave nobody able to manage users.
 
-    Call it before deactivating `user` or removing their admin role. A
-    user who is not an active admin is never the last one, so the call
-    passes for them.
-
-    The active admins are read `FOR UPDATE`: two requests that each take
-    one of the last two admins away serialise on those rows, so the
-    second sees the first one's change and is refused, instead of both
-    passing the check.
+    Call it before deactivating `user` or removing their admin role, and
+    commit that change in the same transaction: the call takes the admin
+    change lock (see `lock_admin_changes`), so two overlapping requests
+    that each take one of the last two admins away run one after the
+    other, and the second is refused. A user who is not an active admin is
+    never the last one, so the call passes for them.
     """
+    await lock_admin_changes(session)
     result = await session.execute(
         select(User.id)
         .join(UserRole, UserRole.user_id == User.id)
         .join(Role, Role.id == UserRole.role_id)
         .where(Role.name == ADMIN_ROLE, User.is_active.is_(True))
-        .with_for_update(of=User)
     )
     active_admin_ids = set(result.scalars().all())
     if active_admin_ids == {user.id}:
@@ -34,3 +55,83 @@ async def ensure_not_last_active_admin(session: AsyncSession, user: User) -> Non
             status_code=409,
             detail="Cannot remove the last active admin",
         )
+
+
+async def replace_user_roles(
+    session: AsyncSession, user: User, new_roles: list[Role]
+) -> bool:
+    """Make `user` hold exactly `new_roles`. Returns True when the set
+    changed, False when it was already that set (nothing is written)."""
+    wanted = {role.id for role in new_roles}
+    current: dict[uuid.UUID, UserRole] = {}
+    duplicates: list[UserRole] = []
+    for user_role in user.roles:
+        if user_role.role_id in current:
+            # user_roles has no unique (user, role) constraint, so an
+            # earlier race may have left a second row. Drop it.
+            duplicates.append(user_role)
+        else:
+            current[user_role.role_id] = user_role
+    changed = wanted != set(current)
+    for user_role in duplicates:
+        await session.delete(user_role)
+    for role_id, user_role in current.items():
+        if role_id not in wanted:
+            await session.delete(user_role)
+    for role_id in wanted - set(current):
+        session.add(UserRole(user_id=user.id, role_id=role_id))
+    if changed or duplicates:
+        await session.flush()
+        await session.refresh(user, ["roles"])
+    return changed
+
+
+async def change_user_roles(
+    session: AsyncSession,
+    *,
+    caller: User,
+    user_id: uuid.UUID,
+    role_names: set[str],
+) -> User:
+    """Replace the roles `user_id` holds with `role_names`, for PUT
+    /v1/users/{id}/roles. Raises 404 (no such user), 422 (unknown role
+    name) or 409 (removing the caller's own admin role, or the last active
+    admin's). Bumps the token version when the set changed, so the user's
+    old tokens, which carry the old `scopes`, stop working."""
+    # One role change at a time: two identical requests (a double click)
+    # would otherwise both insert the same user_roles rows, since nothing
+    # in that table stops a duplicate, and the admin checks below need to
+    # see the previous change's result.
+    await lock_admin_changes(session)
+
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    # The session may already hold this user (as the caller) with roles
+    # read before the lock was taken.
+    await session.refresh(user, ["roles"])
+
+    roles = await get_roles_by_name(session, role_names)
+    unknown = sorted(role_names - {role.name for role in roles})
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown role(s): {', '.join(unknown)}",
+        )
+
+    holds_admin = ADMIN_ROLE in {ur.role.name for ur in user.roles}
+    if holds_admin and ADMIN_ROLE not in role_names:
+        if user.id == caller.id:
+            raise HTTPException(
+                status_code=409,
+                detail="You cannot remove your own admin role",
+            )
+        await ensure_not_last_active_admin(session, user)
+
+    # TODO(#219): record_event(...)
+    if await replace_user_roles(session, user, roles):
+        # No invalidate_role_cache: that cache holds what each role may
+        # do, which did not change, and the user's roles are re-read on
+        # every request. No user-wide Redis block either: #229 removed it.
+        await bump_token_version(session, user)
+    return user

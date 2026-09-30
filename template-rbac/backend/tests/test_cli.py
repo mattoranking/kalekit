@@ -206,7 +206,7 @@ async def test_create_admin_on_an_empty_auth_schema_seeds_and_grants_admin(
         await engine.dispose()
 
     assert role_names == {"visitor", "admin"}
-    # visitor holds nothing; admin holds every supported scope. The six
+    # visitor holds nothing; admin holds every supported scope. The
     # names are spelled out so a scope added to or dropped from Scope
     # shows up here as a deliberate test edit.
     assert sorted(tuple(row) for row in granted) == sorted(
@@ -216,6 +216,8 @@ async def test_create_admin_on_an_empty_auth_schema_seeds_and_grants_admin(
             "posts:write",
             "users:read",
             "users:write",
+            "roles:read",
+            "roles:write",
             "admin:read",
             "admin:write",
         )
@@ -242,7 +244,7 @@ async def test_create_admin_twice_on_an_empty_auth_schema_reports_already_admin(
     try:
         async with create_async_sessionmaker(engine)() as session:
             assert len((await session.scalars(select(Role))).all()) == 2
-            assert len((await session.scalars(select(RolePermission))).all()) == 6
+            assert len((await session.scalars(select(RolePermission))).all()) == 8
             assert len((await session.scalars(select(UserRole))).all()) == 1
     finally:
         await engine.dispose()
