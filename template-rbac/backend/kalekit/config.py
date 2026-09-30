@@ -228,6 +228,14 @@ class Settings(BaseSettings):
     # and a deployment behind Traefik/another trusted proxy opts in.
     TRUST_PROXY_HEADERS: bool = False
 
+    # How many proxies in front of the API append to `X-Forwarded-For`.
+    # Used only when TRUST_PROXY_HEADERS is on. The client IP is the
+    # entry that many places from the RIGHT of the header: each trusted
+    # proxy appends the address it saw, while anything a client sends
+    # sits further left and can't be trusted. The default of 1 fits a
+    # single Traefik directly in front of the API.
+    TRUSTED_PROXY_HOPS: int = Field(default=1, ge=1)
+
     # How long a post-OAuth-*re-authentication* ticket lives in Redis
     # before it expires unused (see /oauth/{provider}/callback's `reauth`
     # branch and POST /auth/reauthenticate, #16). Same shape as

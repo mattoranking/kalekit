@@ -479,35 +479,104 @@ async def test_reset_password_is_rate_limited_per_ip(
     assert "Retry-After" in blocked.headers
 
 
-def test_get_client_ip_uses_the_first_forwarded_for_entry(
+def test_get_client_ip_uses_the_entry_the_trusted_proxy_appended(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
 
-    request = _request_with_forwarded_for("198.51.100.4, 203.0.113.9")
+    request = _request_with_forwarded_for("198.51.100.4")
 
     assert get_client_ip(request) == "198.51.100.4"
+
+
+def test_get_client_ip_ignores_a_client_supplied_leading_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The client sent `6.6.6.6`; the proxy appended the address it saw
+    (`198.51.100.4`). The key must not depend on what the client sent."""
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+
+    first = get_client_ip(_request_with_forwarded_for("6.6.6.6, 198.51.100.4"))
+    second = get_client_ip(_request_with_forwarded_for("7.7.7.7, 198.51.100.4"))
+
+    assert first == second == "198.51.100.4"
+
+
+def test_get_client_ip_counts_trusted_hops_from_the_right(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 2)
+
+    request = _request_with_forwarded_for("6.6.6.6, 198.51.100.4, 10.0.0.2")
+
+    assert get_client_ip(request) == "198.51.100.4"
+
+
+def test_get_client_ip_joins_repeated_forwarded_for_header_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two header lines are one list; the later line is the proxy's."""
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+    scope = {
+        "type": "http",
+        "headers": [
+            (b"x-forwarded-for", b"6.6.6.6"),
+            (b"x-forwarded-for", b"198.51.100.4"),
+        ],
+        "client": ("203.0.113.9", 12345),
+    }
+
+    assert get_client_ip(Request(scope)) == "198.51.100.4"
+
+
+def test_get_client_ip_falls_back_when_there_are_fewer_entries_than_hops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 2)
+
+    request = _request_with_forwarded_for("198.51.100.4")
+
+    assert get_client_ip(request) == "203.0.113.9"
 
 
 def test_get_client_ip_falls_back_when_the_forwarded_for_header_is_malformed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression test (round-3 Copilot finding on PR #88): a leading
-    empty entry (e.g. a header of ", 1.2.3.4") must not produce an
-    empty-string IP -- that would collapse every client sending such a
-    header onto the same Redis key (`login_rate:ip:`), letting one
-    attacker's malformed header contaminate other callers' throttling."""
+    """Regression test (round-3 Copilot finding on PR #88): an empty
+    entry in the trusted position (e.g. a header of "1.2.3.4, ") must
+    not produce an empty-string IP -- that would collapse every client
+    sending such a header onto the same Redis key (`login_rate:ip:`),
+    letting one attacker's malformed header contaminate other callers'
+    throttling."""
     monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
 
-    request = _request_with_forwarded_for(", 1.2.3.4")
+    request = _request_with_forwarded_for("1.2.3.4, ")
 
     assert get_client_ip(request) == "203.0.113.9"
+
+
+def test_get_client_ip_strips_whitespace_around_the_trusted_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
+
+    request = _request_with_forwarded_for("6.6.6.6 ,   198.51.100.4  ")
+
+    assert get_client_ip(request) == "198.51.100.4"
 
 
 def test_get_client_ip_falls_back_when_the_forwarded_for_header_is_only_whitespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(settings, "TRUST_PROXY_HEADERS", True)
+    monkeypatch.setattr(settings, "TRUSTED_PROXY_HOPS", 1)
 
     request = _request_with_forwarded_for("   ")
 
