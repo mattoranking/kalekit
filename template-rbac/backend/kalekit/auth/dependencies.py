@@ -71,7 +71,7 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
             audience=_VALID_AUDIENCES,
             issuer=settings.JWT_ISSUER,
             leeway=settings.JWT_LEEWAY_SECONDS,
-            options={"require": ["exp", "aud", "iss", "sub", "jti"]},
+            options={"require": ["exp", "aud", "iss", "sub", "jti", "ver"]},
         )
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -133,6 +133,15 @@ async def get_current_user(
     user = await session.get(User, user_id)
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
+
+    # The database cut-off (#195): change-password, password reset and
+    # logout-all bump `token_version`, so a token issued under an older
+    # version is rejected here without needing Redis. Compared for
+    # equality and with `type(...) is int` so a bool or string `ver`
+    # can't pass (True == 1).
+    ver = payload.get("ver")
+    if type(ver) is not int or ver != user.token_version:
+        raise HTTPException(status_code=401, detail="Token has been revoked")
     return user
 
 

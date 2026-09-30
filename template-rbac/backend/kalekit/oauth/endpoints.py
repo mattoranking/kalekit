@@ -345,6 +345,7 @@ async def oauth_callback(
     access_token = create_access_token(
         str(user.id),
         list(scopes),
+        token_version=user.token_version,
         client=client_type,
         session_id=str(token_row.family_id),
     )

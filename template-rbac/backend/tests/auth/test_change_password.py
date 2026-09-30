@@ -20,6 +20,7 @@ def _access_token_with_bad_sid(user_id: str) -> str:
         "jti": "bad-sid-test-jti",
         "scopes": [],
         "type": "access",
+        "ver": 0,
         "sid": "not-a-uuid",
         "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
         "aud": "web",
@@ -114,7 +115,14 @@ async def test_change_password_revokes_other_sessions_but_keeps_the_current_one(
     )
     assert current_refresh_response.status_code == 200
 
-    still_ok = await client.get("/v1/auth/me", headers=_auth(current_access))
+    # Its old access token is cut off with the others (#195), but the
+    # token minted by that refresh works.
+    old_token = await client.get("/v1/auth/me", headers=_auth(current_access))
+    assert old_token.status_code == 401
+    still_ok = await client.get(
+        "/v1/auth/me",
+        headers=_auth(current_refresh_response.json()["access_token"]),
+    )
     assert still_ok.status_code == 200
 
     # The other session is dead: its refresh token is revoked...
@@ -157,7 +165,7 @@ async def test_change_password_without_a_session_id_requires_reauth_not_500(
 
     user = await find_user_by_email(session, email)
     assert user is not None
-    sidless_token = create_access_token(str(user.id), [])
+    sidless_token = create_access_token(str(user.id), [], token_version=0)
 
     response = await client.post(
         "/v1/auth/change-password",

@@ -44,7 +44,7 @@ def test_verify_password_rejects_wrong_password() -> None:
 
 
 def test_create_access_token_carries_kid_header() -> None:
-    token = create_access_token("user-1", ["read"])
+    token = create_access_token("user-1", ["read"], token_version=0)
 
     header = jwt.get_unverified_header(token)
 
@@ -52,7 +52,7 @@ def test_create_access_token_carries_kid_header() -> None:
 
 
 def test_create_access_token_carries_configured_issuer() -> None:
-    token = create_access_token("user-1", ["read"])
+    token = create_access_token("user-1", ["read"], token_version=0)
 
     payload = jwt.decode(
         token,
@@ -67,7 +67,7 @@ def test_create_access_token_carries_configured_issuer() -> None:
 def test_create_access_token_defaults_to_web_audience() -> None:
     """No explicit client -- defaults to the web client, matching
     LoginRequest.client's default."""
-    token = create_access_token("user-1", ["read"])
+    token = create_access_token("user-1", ["read"], token_version=0)
 
     payload = jwt.decode(
         token,
@@ -88,7 +88,9 @@ def test_create_access_token_carries_the_requested_client_as_audience(
     """The `aud` claim is the client the token was minted for -- this
     is what lets require_admin_client tell an admin-client token apart
     from a web/mobile one that merely carries admin scopes. See #6."""
-    token = create_access_token("user-1", ["read"], client=client_type)
+    token = create_access_token(
+        "user-1", ["read"], token_version=0, client=client_type
+    )
 
     payload = jwt.decode(
         token,
@@ -101,7 +103,9 @@ def test_create_access_token_carries_the_requested_client_as_audience(
 
 
 def test_create_access_token_rejects_decode_with_wrong_audience() -> None:
-    token = create_access_token("user-1", ["read"], client=ClientType.web)
+    token = create_access_token(
+        "user-1", ["read"], token_version=0, client=ClientType.web
+    )
 
     with pytest.raises(jwt.InvalidAudienceError):
         jwt.decode(
@@ -126,7 +130,9 @@ def test_create_access_token_uses_the_clients_configured_lifetime(
     """Each client has its own access token lifetime (admin's is
     shorter than web/mobile's by default -- see config.py)."""
     now = time.time()
-    token = create_access_token("user-1", ["read"], client=client_type)
+    token = create_access_token(
+        "user-1", ["read"], token_version=0, client=client_type
+    )
 
     payload = jwt.decode(
         token,

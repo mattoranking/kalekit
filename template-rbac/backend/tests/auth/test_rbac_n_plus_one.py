@@ -366,11 +366,12 @@ async def test_change_password_blocks_all_revoked_sessions_in_one_redis_write(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_change_password_redis_failure_is_not_swallowed(
+async def test_change_password_redis_failure_is_logged_not_a_503(
     client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A Redis failure while blocking the revoked sessions is not
-    silently turned into a 200: it is a clean 503 (#177)."""
+    """A Redis failure while blocking the revoked sessions no longer
+    fails the request: the committed token_version bump cuts the other
+    sessions off, so it is a 200 (#195; it was a 503 under #177)."""
     email = "n-plus-one-change-pw-outage@example.com"
     assert (await register(email)).status_code == 201
     current = await _login(client, email)
@@ -382,4 +383,4 @@ async def test_change_password_redis_failure_is_not_swallowed(
         headers={"Authorization": f"Bearer {current}"},
         json={"current_password": _PASSWORD, "new_password": "newpassword456"},
     )
-    assert response.status_code == 503
+    assert response.status_code == 200
