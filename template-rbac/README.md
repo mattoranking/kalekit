@@ -159,6 +159,21 @@ CI and the staging `test-backend` job start a Redis service and set
 `KALEKIT_REDIS_URL` to `redis://localhost:6379/15`; the suite refuses Redis
 db 0.
 
+### Email in production
+
+Production has no email sender yet. `get_email_sender()` in
+`backend/kalekit/utils/email.py` raises `RuntimeError` when the environment
+is production, so:
+
+- `POST /v1/auth/register` and `POST /v1/auth/resend-verification` return `500`,
+  because they send the verification email before responding.
+- `POST /v1/auth/password/forgot` still returns `202`, because the email is sent
+  in a background task after the response, but nothing is sent.
+
+In every other environment (development, testing, preview, staging) the
+emails, including their links, are printed to the server console. Adding a
+real provider is tracked in #192.
+
 ## License
 
 MIT

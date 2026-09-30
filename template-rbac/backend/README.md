@@ -51,8 +51,15 @@ password is outside the range (the `create-admin` command applies the
 same rule). Login enforces only the maximum: an oversized password gets
 the same `401 Invalid credentials` as a wrong one, without running the
 hash, and existing accounts with shorter passwords can still sign in and
-change them. The rule lives in `kalekit/auth/password_policy.py`; new
-endpoints that set a password should use its `NewPassword` type.
+change them. Because login also checks the maximum
+(`auth/service.py`, `verify_password` via `password_too_long`), lowering
+`KALEKIT_PASSWORD_MAX_LENGTH` locks out every user whose existing password
+is longer than the new limit: they can no longer sign in and have to reset
+the password. In production this reset does not work until an email sender
+exists (see "Email in production" in the template README and #192), so
+there, lowering the limit locks those users out with no way back. Raising the limit is always safe. The rule lives in
+`kalekit/auth/password_policy.py`; new endpoints that set a password
+should use its `NewPassword` type.
 
 ## Access token issuer
 
