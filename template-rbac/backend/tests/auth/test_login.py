@@ -4,6 +4,7 @@ from httpx import AsyncClient
 
 import kalekit.auth.endpoints as auth_endpoints
 from kalekit.config import settings
+from kalekit.oauth.repository import find_or_create_oauth_user
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -154,3 +155,28 @@ async def test_login_rejects_an_unknown_client(client: AsyncClient, register) ->
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_oauth_only_account_is_refused_even_if_verifier_returns_true(
+    client: AsyncClient,
+    session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal of an OAuth-only account (password_hash None) must not
+    rest on nobody knowing the dummy hash's password: if the verifier
+    ever returned True, the account must still be refused."""
+    await find_or_create_oauth_user(
+        session,
+        platform="github",
+        account_id="oauth-only-guard",
+        account_email="oauth-guard@example.com",
+    )
+    monkeypatch.setattr(auth_endpoints, "verify_password", lambda plain, hashed: True)
+
+    response = await client.post(
+        "/v1/auth/login",
+        json={"email": "oauth-guard@example.com", "password": "anything-at-all"},
+    )
+
+    assert response.status_code == 401

@@ -238,7 +238,7 @@ async def login(
     password_hash = (user.password_hash if user else None) or DUMMY_PASSWORD_HASH
     password_valid = verify_password(body.password, password_hash)
 
-    if not user or not password_valid:
+    if not user or not user.password_hash or not password_valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account deactivated")
@@ -506,7 +506,7 @@ async def refresh(
 @router.post("/logout", status_code=204)
 async def logout(
     user: Annotated[User, Depends(get_current_user)],
-    jti: Annotated[str | None, Depends(get_current_jti)],
+    jti: Annotated[str, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
     body: LogoutRequest,
 ):
@@ -524,17 +524,16 @@ async def logout(
     # Without this, the access token used to call /logout stays valid
     # for the rest of its natural lifetime -- logging out wouldn't
     # actually revoke the thing that grants access.
-    if jti:
-        try:
-            await block_token(jti)
-        except RedisError:
-            return _revocation_unavailable("logout_block_token_failed")
+    try:
+        await block_token(jti)
+    except RedisError:
+        return _revocation_unavailable("logout_block_token_failed")
 
 
 @router.post("/logout-all", status_code=204)
 async def logout_all(
     user: Annotated[User, Depends(get_current_user)],
-    jti: Annotated[str | None, Depends(get_current_jti)],
+    jti: Annotated[str, Depends(get_current_jti)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ):
     """End every session for this user, on every client/device."""
@@ -545,8 +544,7 @@ async def logout_all(
     # naturally expires, even though its refresh token is now dead.
     try:
         await block_all_user_tokens(str(user.id))
-        if jti:
-            await block_token(jti)
+        await block_token(jti)
     except RedisError:
         return _revocation_unavailable("logout_all_block_failed")
 
