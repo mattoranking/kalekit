@@ -175,6 +175,50 @@ async def test_filters_combine_and_total_counts_the_filtered_set(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_role_narrows_items_and_total_together_with_other_filters(
+    client: AsyncClient, register, login, promote_to_admin, session
+) -> None:
+    token = await _admin_token(register, login, promote_to_admin)
+    await register("ops@example.com")
+    await promote_to_admin("ops@example.com")
+    await register("ops-visitor@example.com")
+    await register("idle-ops@example.com")
+    await promote_to_admin("idle-ops@example.com")
+    idle = await find_user_by_email(session, "idle-ops@example.com")
+    assert idle is not None
+    idle.is_active = False
+    await session.flush()
+
+    with_q = await _list(client, token, q="ops", role="admin")
+    with_active = await _list(client, token, role="admin", is_active="true")
+    with_all = await _list(
+        client, token, q="ops", role="admin", is_active="true", size=1
+    )
+    wrong_role = await _list(client, token, q="ops-visitor", role="admin")
+
+    assert sorted(_emails(with_q)) == ["idle-ops@example.com", "ops@example.com"]
+    assert with_q["total"] == 2
+    assert sorted(_emails(with_active)) == ["boss@example.com", "ops@example.com"]
+    assert with_active["total"] == 2
+    assert _emails(with_all) == ["ops@example.com"]
+    assert with_all["total"] == 1
+    assert wrong_role["items"] == []
+    assert wrong_role["total"] == 0
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_empty_role_and_empty_q_are_ignored(
+    client: AsyncClient, register, login, promote_to_admin
+) -> None:
+    token = await _admin_token(register, login, promote_to_admin)
+    await register("a@example.com")
+
+    body = await _list(client, token, q="", role="")
+
+    assert body["total"] == 2
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_total_with_role_filter_counts_each_user_once(
     client: AsyncClient, register, login, promote_to_admin
 ) -> None:

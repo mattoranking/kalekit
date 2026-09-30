@@ -26,7 +26,7 @@ async def get_users(
     conditions: list[ColumnElement[bool]] = []
     if q:
         conditions.append(User.email.ilike(f"%{_escape_like(q)}%", escape="\\"))
-    if role is not None:
+    if role:
         # EXISTS, not a join: a user with several roles must count once.
         conditions.append(
             exists().where(
@@ -51,7 +51,9 @@ async def get_users(
     return list(result.scalars().all()), total
 
 
-async def get_user_by_id(session: AsyncSession, user_id: uuid.UUID) -> User | None:
+async def get_user_by_id(
+    session: AsyncSession, user_id: uuid.UUID
+) -> User | None:
     return await session.get(User, user_id)
 
 
