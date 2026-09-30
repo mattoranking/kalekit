@@ -19,6 +19,21 @@ from kalekit.redis import get_redis
 password_hash = PasswordHash([Argon2Hasher()])
 logger = structlog.get_logger()
 
+# A precomputed hash with no corresponding user, used to keep the login
+# timing profile identical whether or not the submitted email exists,
+# and whether or not the account has a password at all (OAuth-only
+# accounts have password_hash None). Without it, login would skip the
+# slow Argon2 verify for those cases and an attacker could tell them
+# apart from "wrong password" by response time.
+#
+# It must be an Argon2 hash with the parameters Argon2Hasher() produces
+# for every account, so all three cases cost the same. Hardcoded rather
+# than computed at import time to avoid adding startup-time variance.
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4"
+    "$trD9/9MVHdqUHmI1ujzBGQ$sYhVtOBGIDR2cGcALLbDhC/z7xMEdMVZh6Ui8NNDJzY"
+)
+
 
 def hash_password(password: str) -> str:
     return password_hash.hash(password)
