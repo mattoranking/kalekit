@@ -162,9 +162,9 @@ Production has no email sender yet. `get_email_sender()` in
 `backend/kalekit/utils/email.py` raises `RuntimeError` when the environment
 is production, so:
 
-- `POST /auth/register` and `POST /auth/resend-verification` return `500`,
+- `POST /v1/auth/register` and `POST /v1/auth/resend-verification` return `500`,
   because they send the verification email before responding.
-- `POST /auth/password/forgot` still returns `202`, because the email is sent
+- `POST /v1/auth/password/forgot` still returns `202`, because the email is sent
   in a background task after the response, but nothing is sent.
 
 In every other environment (development, testing, preview, staging) the
