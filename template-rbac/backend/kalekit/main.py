@@ -4,6 +4,7 @@ from typing import TypedDict
 
 import structlog
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from kalekit.api import router
@@ -27,6 +28,7 @@ from kalekit.utils.db.database import (
     create_async_sessionmaker,
     create_sync_sessionmaker,
 )
+from kalekit.validation_errors import request_validation_handler
 
 log: Logger = structlog.get_logger()
 
@@ -98,6 +100,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    app.add_exception_handler(RequestValidationError, request_validation_handler)
     configure_cors(app)
     configure_security(app)
 
