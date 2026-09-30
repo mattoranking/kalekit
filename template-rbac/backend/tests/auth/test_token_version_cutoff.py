@@ -11,7 +11,7 @@ Also covers the two refresh refusals (invalid client, absolute
 timeout): with the family block failing they return the normal 401.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import AsyncClient
@@ -211,16 +211,35 @@ async def test_change_password_caller_refreshes_into_a_working_access_token(
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_same_second_tokens_before_and_after_the_change_are_told_apart(
-    client: AsyncClient, register, auth_header
+    client: AsyncClient, register, auth_header, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The version is a counter, not a timestamp, so no clock resolution
     is involved: a token issued right before the change is rejected and
-    one issued right after is accepted, however close together they are."""
+    one issued right after is accepted, however close together they are.
+
+    The clock used for token issuance is frozen so every token below gets
+    the same `exp`, i.e. all are issued in the same second. Redis writes
+    are broken so the `ver` check alone decides the outcome, not the
+    Redis session block."""
+    import jwt
+
+    from kalekit.auth import service
+
+    frozen = datetime.now(timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return frozen
+
+    monkeypatch.setattr(service, "datetime", _FrozenDatetime)
+
     email = "cutoff-same-second@example.com"
     await register(email, _OLD)
     before = await _login(client, email, _OLD)
     actor = await _login(client, email, _OLD)
 
+    await _break_blocklist_writes(monkeypatch)
     changed = await client.post(
         "/v1/auth/change-password",
         headers=auth_header(actor["access_token"]),
@@ -229,6 +248,10 @@ async def test_same_second_tokens_before_and_after_the_change_are_told_apart(
     assert changed.status_code == 200
     after = await _login(client, email, _NEW)
 
+    def _exp(token: str) -> int:
+        return jwt.decode(token, options={"verify_signature": False})["exp"]
+
+    assert _exp(before["access_token"]) == _exp(after["access_token"])
     assert await _me_status(client, auth_header, before["access_token"]) == 401
     assert await _me_status(client, auth_header, after["access_token"]) == 200
 

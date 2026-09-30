@@ -88,9 +88,7 @@ def test_create_access_token_carries_the_requested_client_as_audience(
     """The `aud` claim is the client the token was minted for -- this
     is what lets require_admin_client tell an admin-client token apart
     from a web/mobile one that merely carries admin scopes. See #6."""
-    token = create_access_token(
-        "user-1", ["read"], token_version=0, client=client_type
-    )
+    token = create_access_token("user-1", ["read"], token_version=0, client=client_type)
 
     payload = jwt.decode(
         token,
@@ -130,9 +128,7 @@ def test_create_access_token_uses_the_clients_configured_lifetime(
     """Each client has its own access token lifetime (admin's is
     shorter than web/mobile's by default -- see config.py)."""
     now = time.time()
-    token = create_access_token(
-        "user-1", ["read"], token_version=0, client=client_type
-    )
+    token = create_access_token("user-1", ["read"], token_version=0, client=client_type)
 
     payload = jwt.decode(
         token,
