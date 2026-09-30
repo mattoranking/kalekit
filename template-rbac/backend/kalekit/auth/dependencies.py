@@ -336,6 +336,37 @@ async def require_admin_client(
     would still accept -- this dependency additionally requires the
     token to have been minted by the admin client itself. Compose it
     alongside `require_permission` on admin-only routes. See #6.
+
+    Answers 404, not 403, so a caller who isn't allowed on the admin
+    surface can't tell it exists. Admin routes should use
+    `require_admin_permission`, which applies the same 404 to a
+    missing permission. See #222.
     """
     if client is not ClientType.admin:
-        raise HTTPException(status_code=403, detail="Admin client required")
+        raise _admin_not_found()
+
+
+def _admin_not_found() -> HTTPException:
+    return HTTPException(status_code=404, detail="Not Found")
+
+
+def require_admin_permission(permission: str):
+    """Dependency factory for admin-only routes: the caller's token
+    must come from the admin client AND the user must hold
+    `permission`. Either failure is a 404, never a 403, so the admin
+    surface looks absent to anyone who isn't allowed on it (#222).
+    Product routes keep using `require_permission` and its 403."""
+
+    async def checker(
+        client: Annotated[ClientType, Depends(get_current_client)],
+        user: Annotated[User, Depends(get_current_user)],
+        session: Annotated[AsyncSession, Depends(get_db_session)],
+    ) -> User:
+        await require_admin_client(client)
+        roles = [ur.role.name for ur in user.roles]
+        scopes = await get_scopes_for_roles(session, roles)
+        if permission not in scopes:
+            raise _admin_not_found()
+        return user
+
+    return checker

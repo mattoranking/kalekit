@@ -55,7 +55,7 @@ async def test_removing_admin_role_blocks_admin_routes_on_the_next_request(
     await session.refresh(user, attribute_names=["roles"])
 
     blocked = await client.get("/v1/users/", headers=_auth(token))
-    assert blocked.status_code == 403
+    assert blocked.status_code == 404
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -89,7 +89,7 @@ async def test_revoking_a_permission_blocks_it_next_request_after_cache_invalida
     await invalidate_role_cache(ADMIN_ROLE)
 
     blocked = await client.get("/v1/users/", headers=_auth(token))
-    assert blocked.status_code == 403
+    assert blocked.status_code == 404
 
 
 def test_role_cache_ttl_is_short() -> None:
