@@ -17,7 +17,6 @@ from kalekit.auth.dependencies import (
     require_recent_auth,
 )
 from kalekit.auth.permissions import (
-    block_all_user_tokens,
     block_families_tokens,
     block_family_tokens,
     block_token,
@@ -574,10 +573,10 @@ async def logout_all(
     # version, on any device, is rejected by get_current_user from the
     # next request, with or without Redis (#195).
     await bump_token_version(session, user)
-    # The Redis blocks stay as a second layer, but a failure here is only
-    # logged: the version bump above already covers every token.
+    # The caller's own token is also blocked by jti as a second layer; a
+    # failure here is only logged: the version bump above already covers
+    # every token.
     try:
-        await block_all_user_tokens(str(user.id))
         await block_token(jti)
     except RedisError:
         _log_redis_block_failure("logout_all_block_failed")
@@ -678,24 +677,6 @@ async def change_password(
         # Logged, not a 503: the password change and the version bump are
         # committed and cut off the other sessions' access tokens.
         _log_redis_block_failure("change_password_block_failed")
-
-    if keep_family_id is None:
-        # The caller's own access token has no (usable) session id, so
-        # there's no family id to spare it from being blocked above --
-        # every family (including whichever one minted this very
-        # token) was just revoked. Falling back to block_all_user_tokens
-        # fails closed: the promise is "everywhere else is signed out
-        # immediately", and leaving this access token usable until its
-        # natural expiry would quietly break that for this edge case
-        # (tokens minted before `sid` existed, or issued outside
-        # login/refresh/OAuth). This does mean the *current* request's
-        # own token also becomes unusable next call, since we can't
-        # tell it apart from the others without a session id -- an
-        # acceptable trade next to leaving a live token unrevoked.
-        try:
-            await block_all_user_tokens(str(user.id))
-        except RedisError:
-            _log_redis_block_failure("change_password_block_failed")
 
     return MessageResponse(detail="Password changed")
 
@@ -1050,18 +1031,11 @@ async def reset_password(
     await update_user_password(session, user, body.new_password)
 
     # Same "sign out everywhere" pair /auth/logout-all uses: revoke
-    # every refresh token family (the sessions themselves), then
-    # blanket-block every access token this user currently holds so an
-    # already-minted one doesn't keep working for the rest of its
-    # natural lifetime despite its refresh token now being dead.
+    # every refresh token family (the sessions themselves), and bump the
+    # token version so every access token already minted is rejected by
+    # get_current_user from the next request, without Redis (#195). A
+    # login after this reset gets the new version and works at once.
     await revoke_user_refresh_tokens(session, user.id)
     await bump_token_version(session, user)
-    try:
-        await block_all_user_tokens(str(user.id))
-    except RedisError:
-        # Logged, not a 503: the reset is committed and the version bump
-        # cuts off every access token. A retry could not finish anything,
-        # the reset token is already spent.
-        _log_redis_block_failure("password_reset_block_failed")
 
     return MessageResponse(detail="Password reset")

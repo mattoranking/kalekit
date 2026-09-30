@@ -120,7 +120,7 @@ async def get_current_user(
     # for the length of the outage. Reject with a documented 503 rather
     # than let the RedisError surface as an unhandled 500.
     try:
-        blocked = await is_any_blocked(jti, user_id, sid)
+        blocked = await is_any_blocked(jti, sid)
     except RedisError as exc:
         logger.warning("token_blocklist_check_failed", exc_info=True)
         raise HTTPException(

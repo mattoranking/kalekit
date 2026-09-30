@@ -165,15 +165,13 @@ async def test_password_reset_cuts_off_access_tokens_with_redis_down(
     )
 
     await _break_blocklist_writes(monkeypatch)
-    with capture_logs() as logs:
-        response = await client.post(
-            "/v1/auth/password/reset",
-            json={"token": raw_token, "new_password": _NEW},
-        )
+    response = await client.post(
+        "/v1/auth/password/reset",
+        json={"token": raw_token, "new_password": _NEW},
+    )
 
     assert response.status_code == 200
     assert response.json() == {"detail": "Password reset"}
-    assert any(log["event"] == "password_reset_block_failed" for log in logs)
     assert await _me_status(client, auth_header, victim["access_token"]) == 401
 
 

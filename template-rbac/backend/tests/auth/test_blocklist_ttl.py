@@ -9,7 +9,6 @@ has to last at least that long.
 import pytest
 
 from kalekit.auth.permissions import (
-    block_all_user_tokens,
     block_families_tokens,
     block_family_tokens,
     block_token,
@@ -30,14 +29,13 @@ def _required_ttl() -> int:
     ("block", "key"),
     [
         (lambda: block_token("ttl-jti"), "blocked_token:ttl-jti"),
-        (lambda: block_all_user_tokens("ttl-user"), "blocked_user:ttl-user"),
         (lambda: block_family_tokens("ttl-family"), "blocked_family:ttl-family"),
         (
             lambda: block_families_tokens(["ttl-fam-a", "ttl-fam-b"]),
             "blocked_family:ttl-fam-b",
         ),
     ],
-    ids=["token", "user", "family", "families"],
+    ids=["token", "family", "families"],
 )
 async def test_block_key_outlives_expiry_plus_leeway(block, key: str) -> None:
     await block()
