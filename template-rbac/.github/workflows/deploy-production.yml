@@ -74,6 +74,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-and-push]
     environment: production
+    # One production deploy at a time: the rollback state files and the
+    # container name kalekit_backend_prod are shared by every run.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     steps:
       # Runs on the runner, before any SSH step, so a bad secret fails the
       # job while the live backend is still untouched. The "Rollback on
@@ -320,11 +325,12 @@ jobs:
         uses: appleboy/ssh-action@v1.0.0
         env:
           DEPLOY_VERSION: ${{ needs.build-and-push.outputs.version }}
+          BACKEND_IMG: ${{ needs.build-and-push.outputs.backend_image }}:${{ needs.build-and-push.outputs.version }}
         with:
           host: ${{ secrets.PRODUCTION_HOST }}
           username: ${{ secrets.PRODUCTION_USER }}
           key: ${{ secrets.PRODUCTION_SSH_KEY }}
-          envs: DEPLOY_VERSION
+          envs: DEPLOY_VERSION,BACKEND_IMG
           script: |
             # The backend only `expose`s port 8000 (Traefik reaches it over
             # the Docker network) and publishes no host port, so 127.0.0.1:8000
@@ -334,6 +340,13 @@ jobs:
             for i in 1 2 3 4 5; do
               if docker exec kalekit_backend_prod python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
                 echo "Production backend is healthy!"
+                # The probe answers for whatever container has this name, so
+                # confirm it runs this deploy's image before recording it.
+                RUNNING=$(docker inspect -f '{{.Config.Image}}' kalekit_backend_prod)
+                if [ "$RUNNING" != "${BACKEND_IMG}" ]; then
+                  echo "Health check failed: kalekit_backend_prod runs ${RUNNING}, not ${BACKEND_IMG}"
+                  exit 1
+                fi
                 # Only a version that passed the check becomes a rollback target.
                 echo "${DEPLOY_VERSION}" > /home/deploy/opt/kalekit/production/.version.healthy
                 echo "Recorded ${DEPLOY_VERSION} as the last healthy version"

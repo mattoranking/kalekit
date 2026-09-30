@@ -162,7 +162,9 @@ replaced. If it did switch, the step puts the last healthy version back in
 applied. When no healthy version is recorded (for example the first deploy on a
 host, or a host deployed before this change) or the last healthy version is the
 one that just failed, it logs that it did not roll back and leaves the backend
-as it is. The `.version` and `.version.previous` files are no longer used.
+as it is. Production deploys run one at a time (a `concurrency` group), and the
+health check records a version only if `kalekit_backend_prod` runs that
+version's image. The `.version` and `.version.previous` files are no longer used.
 
 CI and the staging `test-backend` job start a Redis service and set
 `KALEKIT_REDIS_URL` to `redis://localhost:6379/15`; the suite refuses Redis
