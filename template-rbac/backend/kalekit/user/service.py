@@ -34,3 +34,22 @@ async def ensure_not_last_active_admin(session: AsyncSession, user: User) -> Non
             status_code=409,
             detail="Cannot remove the last active admin",
         )
+
+
+async def replace_user_roles(
+    session: AsyncSession, user: User, new_roles: list[Role]
+) -> bool:
+    """Make `user` hold exactly `new_roles`. Returns True when the set
+    changed, False when it was already that set (nothing is written)."""
+    wanted = {role.id for role in new_roles}
+    current = {ur.role_id: ur for ur in user.roles}
+    if wanted == set(current):
+        return False
+    for role_id, user_role in current.items():
+        if role_id not in wanted:
+            await session.delete(user_role)
+    for role_id in wanted - set(current):
+        session.add(UserRole(user_id=user.id, role_id=role_id))
+    await session.flush()
+    await session.refresh(user, ["roles"])
+    return True

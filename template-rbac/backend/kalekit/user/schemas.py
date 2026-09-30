@@ -1,7 +1,8 @@
 import uuid
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 class UserResponse(BaseModel):
@@ -30,3 +31,24 @@ class UserListResponse(BaseModel):
     total: int
     page: int
     size: int
+
+
+class RoleResponse(BaseModel):
+    name: str
+    description: str | None
+    permissions: list[str]
+
+
+class RoleListResponse(BaseModel):
+    items: list[RoleResponse]
+
+
+class UserRolesUpdate(BaseModel):
+    """Body of PUT /v1/users/{id}/roles: the full set of role names the
+    user should hold afterwards. An empty list removes every role."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    roles: list[Annotated[str, StringConstraints(max_length=50)]] = Field(
+        max_length=100
+    )

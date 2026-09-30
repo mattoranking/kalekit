@@ -2,9 +2,10 @@ import uuid
 
 from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from sqlalchemy.sql.elements import ColumnElement
 
-from kalekit.models.role import Role, UserRole
+from kalekit.models.role import Role, RolePermission, UserRole
 from kalekit.models.user import User
 from kalekit.user.sorting import DEFAULT_USER_SORT, UserSort, user_order_by
 
@@ -73,3 +74,20 @@ async def deactivate_user(session: AsyncSession, user: User) -> User:
     user.is_active = False
     await session.flush()
     return user
+
+
+async def list_roles(session: AsyncSession) -> list[Role]:
+    """Every role in the database with its permissions loaded, by name."""
+    result = await session.execute(
+        select(Role)
+        .options(selectinload(Role.permissions).selectinload(RolePermission.permission))
+        .order_by(Role.name)
+    )
+    return list(result.scalars().all())
+
+
+async def get_roles_by_name(session: AsyncSession, names: set[str]) -> list[Role]:
+    if not names:
+        return []
+    result = await session.execute(select(Role).where(Role.name.in_(names)))
+    return list(result.scalars().all())

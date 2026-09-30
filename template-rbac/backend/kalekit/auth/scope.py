@@ -14,6 +14,9 @@ class Scope(StrEnum):
     users_read = "users:read"
     users_write = "users:write"
 
+    roles_read = "roles:read"
+    roles_write = "roles:write"
+
     admin_read = "admin:read"
     admin_write = "admin:write"
 
@@ -37,12 +40,14 @@ SCOPES_SUPPORTED_DISPLAY_NAMES: dict[Scope, str] = {
     Scope.posts_write: "Create or modify posts",
     Scope.users_read: "Read user profiles",
     Scope.users_write: "Create or modify users",
+    Scope.roles_read: "Read roles and their permissions",
+    Scope.roles_write: "Change the roles users hold",
     Scope.admin_read: "Read admin data",
     Scope.admin_write: "Modify admin settings",
 }
 
-SCOPES_READ = {Scope.posts_read, Scope.users_read}
-SCOPES_WRITE = {Scope.posts_write, Scope.users_write}
+SCOPES_READ = {Scope.posts_read, Scope.users_read, Scope.roles_read}
+SCOPES_WRITE = {Scope.posts_write, Scope.users_write, Scope.roles_write}
 SCOPES_ADMIN = {Scope.admin_read, Scope.admin_write}
 
 
