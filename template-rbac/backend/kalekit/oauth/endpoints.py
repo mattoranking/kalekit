@@ -185,7 +185,7 @@ async def oauth_callback(
     code: Annotated[str, Query()],
     state: Annotated[str, Query()],
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """Handle the OAuth provider's redirect.
 

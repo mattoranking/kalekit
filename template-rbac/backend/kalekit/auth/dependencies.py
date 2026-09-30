@@ -107,7 +107,7 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ) -> User:
     payload = _decode_access_token(credentials)
     user_id = payload.get("sub")
@@ -227,7 +227,7 @@ def require_permission(permission: str):
 
     async def checker(
         user: Annotated[User, Depends(get_current_user)],
-        session: Annotated[AsyncSession, Depends(get_db_session)],
+        session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     ) -> User:
         roles = [ur.role.name for ur in user.roles]
         scopes = await get_scopes_for_roles(session, roles)
@@ -279,7 +279,7 @@ def require_recent_auth(max_age_minutes: int | None = None):
     async def checker(
         user: Annotated[User, Depends(get_current_user)],
         session_id: Annotated[str | None, Depends(get_current_session_id)],
-        db_session: Annotated[AsyncSession, Depends(get_db_session)],
+        db_session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     ) -> User:
         # Deferred import: auth.repository imports from auth.service,
         # which doesn't import dependencies.py, so this isn't a real
@@ -360,7 +360,7 @@ def require_admin_permission(permission: str):
     async def checker(
         client: Annotated[ClientType, Depends(get_current_client)],
         user: Annotated[User, Depends(get_current_user)],
-        session: Annotated[AsyncSession, Depends(get_db_session)],
+        session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     ) -> User:
         await require_admin_client(client)
         roles = [ur.role.name for ur in user.roles]

@@ -74,8 +74,18 @@ class AsyncSessionMiddleware:
 
 
 async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession]:
-    """FastAPI dependency - asycn write session with
-    commit/rollback created by the middleware"""
+    """FastAPI dependency - async write session with
+    commit/rollback created by the middleware.
+
+    Always declare it as `Depends(get_db_session, scope="function")`.
+    Since FastAPI 0.118 the exit code of a default ("request" scope)
+    yield dependency runs after the response has been sent, so a failed
+    commit would be reported to the client as success (#238). With
+    `scope="function"` the exit code runs as soon as the endpoint
+    returns, before the response is sent, so a failed commit becomes the
+    normal 500. `tests/test_db_session_commit.py` fails any route that
+    leaves the scope out.
+    """
     try:
         session: AsyncSession = request.state.async_session
     except AttributeError as e:
@@ -90,7 +100,11 @@ async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession]:
         await session.rollback()
         raise
     else:
-        await session.commit()
+        try:
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
 
 
 async def get_db_read_session(request: Request) -> AsyncGenerator[AsyncReadSession]:
