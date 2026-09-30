@@ -75,6 +75,19 @@ jobs:
     needs: [build-and-push]
     environment: production
     steps:
+      # Runs on the runner, before any SSH step, so a bad secret fails the
+      # job while the live backend is still untouched. The "Rollback on
+      # failure" step below only runs once this step has passed.
+      - name: Check JWT secret
+        id: jwt_check
+        env:
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+        run: |
+          if [ "${#JWT_SECRET_KEY}" -lt 32 ]; then
+            echo "::error::the JWT_SECRET_KEY environment secret is missing or shorter than 32 characters"
+            exit 1
+          fi
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.0
         env:
@@ -97,10 +110,10 @@ jobs:
           script: |
             set -e
 
-            # Fail before writing any config if the JWT secret is missing or
-            # too short: the backend refuses to start outside development and
-            # testing with a weak secret. The value is never printed. The
-            # "Rollback on failure" step still runs after this exit.
+            # Second guard behind the "Check JWT secret" step: fail before
+            # writing any config if the JWT secret is missing or too short
+            # (the backend refuses to start with a weak secret). The value is
+            # never printed.
             if [ "${#JWT_SECRET_KEY}" -lt 32 ]; then
               echo "ERROR: the JWT_SECRET_KEY environment secret is missing or shorter than 32 characters"
               exit 1
@@ -304,9 +317,13 @@ jobs:
           username: ${{ secrets.PRODUCTION_USER }}
           key: ${{ secrets.PRODUCTION_SSH_KEY }}
           script: |
+            # The backend only `expose`s port 8000 (Traefik reaches it over
+            # the Docker network) and publishes no host port, so 127.0.0.1:8000
+            # on the host does not answer. Request /health from inside the
+            # container instead, the same way its compose healthcheck does.
             sleep 10
             for i in 1 2 3 4 5; do
-              if curl -sf http://127.0.0.1:8000/health; then
+              if docker exec kalekit_backend_prod python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
                 echo "Production backend is healthy!"
                 exit 0
               fi
@@ -316,8 +333,10 @@ jobs:
             echo "Health check failed"
             exit 1
 
+      # Skipped when the JWT secret check fails: nothing was changed, so the
+      # live backend keeps running as it is.
       - name: Rollback on failure
-        if: failure()
+        if: failure() && steps.jwt_check.outcome == 'success'
         uses: appleboy/ssh-action@v1.0.0
         env:
           BACKEND_IMG_BASE: ${{ needs.build-and-push.outputs.backend_image }}
@@ -337,8 +356,13 @@ jobs:
 
               echo "${CR_PAT}" | docker login ghcr.io -u "${GH_ACTOR}" --password-stdin
 
-              # Update compose to use previous version image
-              sed -i "s|${BACKEND_IMG_BASE}:.*|${BACKEND_IMG_BASE}:${PREV}|" docker-compose.yml
+              # docker-compose.yml uses ${BACKEND_IMG}, which comes from .env,
+              # so the previous image tag goes in .env.
+              sed -i "s|^BACKEND_IMG=.*|BACKEND_IMG=${BACKEND_IMG_BASE}:${PREV}|" .env
+              grep -q "^BACKEND_IMG=${BACKEND_IMG_BASE}:${PREV}\$" .env || {
+                echo "ERROR: could not set BACKEND_IMG in .env; rollback not applied"
+                exit 1
+              }
 
               docker compose pull backend
               docker compose up -d --force-recreate backend
