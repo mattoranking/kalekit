@@ -34,6 +34,15 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
@@ -54,6 +63,9 @@ jobs:
       - name: Run tests
         env:
           KALEKIT_ENV: testing
+          # The suite flushes Redis before every test and refuses db 0,
+          # so point it at a non-zero index.
+          KALEKIT_REDIS_URL: redis://localhost:6379/15
         run: uv run pytest --tb=short
 
   build-and-push:
@@ -367,14 +379,23 @@ jobs:
 
       - name: Health check
         uses: appleboy/ssh-action@v1.0.0
+        env:
+          DEPLOY_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: DEPLOY_SHA
           script: |
-            cd /home/deploy/opt/kalekit/staging
-            docker compose ps
-            if docker compose exec backend python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
+            # The deploy step starts the backend with `docker compose run`,
+            # which creates a container named staging-backend-<sha> that is
+            # not a compose service container, so `docker compose exec
+            # backend` cannot find it. Exec into that container by name.
+            # The app listens on an exposed port with no host port, so the
+            # request has to come from inside the container.
+            SHORT_SHA=$(echo "${DEPLOY_SHA}" | cut -c1-6)
+            docker ps --filter "label=kalekit.service=staging-backend" --format "table {{.Names}}\t{{.Status}}"
+            if docker exec "staging-backend-${SHORT_SHA}" python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
               echo "Staging backend is healthy!"
             else
               # Container logs are deliberately not printed: this repo is public

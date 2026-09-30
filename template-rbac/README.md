@@ -121,9 +121,10 @@ repository secrets.
 `JWT_SECRET_KEY` signs access tokens. The backend refuses to start in
 preview, staging and production if it is a placeholder or shorter than 32
 bytes. Each deploy stops before writing any configuration if it is missing
-or shorter than 32 characters; in production the `Rollback on failure` step
-still runs after that and recreates the backend from the previous
-configuration. Generate one per environment:
+or shorter than 32 characters. In production a separate `Check JWT secret`
+step runs first on the runner, and the `Rollback on failure` step is skipped
+when it fails, so the running backend is left as it is. Generate one per
+environment:
 
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
@@ -133,11 +134,27 @@ python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 use the per-environment default above, or set a variable of that name on the
 Environment to override it.
 
+The preview environments share one `JWT_SECRET_KEY` and one default issuer
+(`kalekit-preview`), so a token from one preview passes the signature and
+issuer checks on another. This is accepted for now: user ids are random UUIDs,
+so a token only matches a user in the preview whose database holds that id.
+
 The deploys also give the backend a Redis container on the internal Docker
 network (no published port) at `redis://redis:6379/0`, and set
 `KALEKIT_TRUST_PROXY_HEADERS=true` because the API only receives traffic
 through Traefik. Neither needs a secret. The workflows do not print container
 logs; read them on the host over SSH.
+
+The backend publishes no host port, so the post-deploy health checks run
+`python -c "urllib.request.urlopen('http://localhost:8000/health')"` inside
+the backend container with `docker exec` (production: `kalekit_backend_prod`;
+staging: `staging-backend-<first 6 chars of the commit sha>`, the container the
+blue-green step starts with `docker compose run`). Previews rely on
+`docker compose up --wait`, which waits for the container healthcheck.
+
+CI and the staging `test-backend` job start a Redis service and set
+`KALEKIT_REDIS_URL` to `redis://localhost:6379/15`; the suite refuses Redis
+db 0.
 
 ## License
 
