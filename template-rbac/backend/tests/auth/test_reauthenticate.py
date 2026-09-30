@@ -2,6 +2,7 @@
 and the require_recent_auth dependency it feeds, applied to
 change-password and session revocation."""
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -449,3 +450,45 @@ async def test_a_successful_reauth_clears_the_account_failure_count(
             json={"password": "wrong-password"},
         )
         assert response.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_parallel_wrong_passwords_are_capped_by_the_reauth_limit(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test (issue #209): the failure count used to be read
+    before the password check and incremented only after a failure, so
+    a burst of parallel guesses all read the old count and all got a
+    real password check. With a limit of 3, 10 simultaneous wrong
+    passwords must reach the password check exactly 3 times; the other
+    7 get 429."""
+    import kalekit.auth.endpoints as auth_endpoints
+
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "REAUTH_RATE_LIMIT_PER_ACCOUNT", 3)
+
+    access_token, _ = await _login_pair(client, "reauth-parallel@example.com")
+
+    real_verify_password = auth_endpoints.verify_password
+    password_checks = 0
+
+    def counting_verify_password(*args, **kwargs):
+        nonlocal password_checks
+        password_checks += 1
+        return real_verify_password(*args, **kwargs)
+
+    monkeypatch.setattr(auth_endpoints, "verify_password", counting_verify_password)
+
+    responses = await asyncio.gather(
+        *(
+            client.post(
+                "/v1/auth/reauthenticate",
+                headers=_auth(access_token),
+                json={"password": f"wrong-{i}"},
+            )
+            for i in range(10)
+        )
+    )
+
+    assert sorted(r.status_code for r in responses) == [401] * 3 + [429] * 7
+    assert password_checks == 3
