@@ -83,6 +83,7 @@ def _make_token(
     iss: str | None = settings.JWT_ISSUER,
     exp_delta: timedelta = timedelta(minutes=15),
     token_type: str = "access",
+    omit: tuple[str, ...] = (),
 ) -> str:
     payload = {
         "sub": "user-1",
@@ -91,6 +92,8 @@ def _make_token(
         "type": token_type,
         "exp": datetime.now(timezone.utc) + exp_delta,
     }
+    for claim in omit:
+        del payload[claim]
     if aud is not None:
         payload["aud"] = aud
     if iss is not None:
@@ -125,6 +128,48 @@ def test_decode_tolerates_small_clock_skew_within_leeway() -> None:
     payload = _decode_access_token(_credentials(token))
 
     assert payload["sub"] == "user-1"
+
+
+@pytest.mark.parametrize("claim", ["sub", "jti"])
+def test_decode_rejects_token_missing_sub_or_jti(claim: str) -> None:
+    """A token without `jti` would skip the per-token blocklist check and
+    make logout a no-op for it; one without `sub` has no user to load."""
+    token = _make_token(omit=(claim,))
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
+
+
+@pytest.mark.parametrize("claim", ["sub", "jti"])
+@pytest.mark.parametrize("value", ["", None, 123])
+def test_decode_rejects_token_with_empty_or_non_string_sub_or_jti(
+    claim: str, value: object
+) -> None:
+    """PyJWT's `require` only catches an absent claim. An empty `jti`
+    would skip the blocklist check (falsy), and an empty `sub` would reach
+    the database as an invalid UUID and surface as a 500."""
+    payload = {
+        "sub": "user-1",
+        "jti": "jti-1",
+        "type": "access",
+        "aud": ClientType.web.value,
+        "iss": settings.JWT_ISSUER,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+        claim: value,
+    }
+    token = jwt.encode(
+        payload,
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM,
+        headers={"kid": settings.JWT_KID},
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
 
 
 def test_decode_rejects_token_missing_audience_claim() -> None:

@@ -71,7 +71,7 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
             audience=_VALID_AUDIENCES,
             issuer=settings.JWT_ISSUER,
             leeway=settings.JWT_LEEWAY_SECONDS,
-            options={"require": ["exp", "aud", "iss"]},
+            options={"require": ["exp", "aud", "iss", "sub", "jti"]},
         )
     except jwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
@@ -91,6 +91,14 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
     # reads `aud` to separately guard against it -- otherwise
     # `ClientType(payload["aud"])` downstream raises on the unhashable
     # list and surfaces as an unhandled 500 instead of failing closed.
+    # `require` above only rejects an absent claim. An empty `jti` would
+    # skip the blocklist check and an empty `sub` is not a user id, so
+    # both must be non-empty strings.
+    for claim in ("sub", "jti"):
+        value = payload[claim]
+        if not isinstance(value, str) or not value:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
     if not isinstance(payload.get("aud"), str):
         raise HTTPException(status_code=401, detail="Invalid token audience")
 
@@ -160,11 +168,12 @@ async def get_current_client(
 
 async def get_current_jti(
     credentials: Annotated[HTTPAuthorizationCredentials, Depends(bearer_scheme)],
-) -> str | None:
+) -> str:
     """The current access token's unique id, for revoking it by itself
-    (e.g. on logout) rather than every token the user holds."""
+    (e.g. on logout) rather than every token the user holds. Always
+    present: the decoder rejects a token without one."""
     payload = _decode_access_token(credentials)
-    return payload.get("jti")
+    return payload["jti"]
 
 
 async def get_current_session_id(

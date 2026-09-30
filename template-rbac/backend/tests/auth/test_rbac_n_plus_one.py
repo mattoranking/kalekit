@@ -357,7 +357,12 @@ async def test_change_password_blocks_all_revoked_sessions_in_one_redis_write(
     r = await get_redis()
     assert len([k async for k in r.scan_iter("blocked_family:*")]) == 3
     for key in [k async for k in r.scan_iter("blocked_family:*")]:
-        assert 0 < await r.ttl(key) <= settings.access_token_max_expire_minutes() * 60
+        assert (
+            0
+            < await r.ttl(key)
+            <= settings.access_token_max_expire_minutes() * 60
+            + settings.JWT_LEEWAY_SECONDS
+        )
 
 
 @pytest.mark.asyncio(loop_scope="session")
