@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict
 
 
 class UserResponse(BaseModel):
@@ -16,8 +16,13 @@ class UserResponse(BaseModel):
 
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
-    is_active: bool | None = None
+    """Body of PATCH /v1/users/{id}. Only `is_active` can change: an
+    email change needs re-verification, so `email` (or any other field)
+    is rejected with 422 rather than ignored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool
 
 
 class UserListResponse(BaseModel):
