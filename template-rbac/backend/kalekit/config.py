@@ -340,6 +340,10 @@ class Settings(BaseSettings):
         case_sensitive=False,
         env_file=env_file,
         extra="allow",
+        # pydantic appends the (truncated) settings input to validation
+        # errors, and its tail can be a real secret that then lands in
+        # deploy logs.
+        hide_input_in_errors=True,
     )
 
     def access_token_expire_minutes(self, client: ClientType) -> int:
