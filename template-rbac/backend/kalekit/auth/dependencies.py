@@ -91,6 +91,14 @@ def _decode_access_token(credentials: HTTPAuthorizationCredentials) -> dict[str,
     # reads `aud` to separately guard against it -- otherwise
     # `ClientType(payload["aud"])` downstream raises on the unhashable
     # list and surfaces as an unhandled 500 instead of failing closed.
+    # `require` above only rejects an absent claim. An empty `jti` would
+    # skip the blocklist check and an empty `sub` is not a user id, so
+    # both must be non-empty strings.
+    for claim in ("sub", "jti"):
+        value = payload[claim]
+        if not isinstance(value, str) or not value:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
     if not isinstance(payload.get("aud"), str):
         raise HTTPException(status_code=401, detail="Invalid token audience")
 
