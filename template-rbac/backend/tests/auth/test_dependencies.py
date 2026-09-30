@@ -382,4 +382,4 @@ async def test_require_admin_client_rejects_non_admin_tokens(
     with pytest.raises(HTTPException) as exc_info:
         await require_admin_client(client_type)
 
-    assert exc_info.value.status_code == 403
+    assert exc_info.value.status_code == 404

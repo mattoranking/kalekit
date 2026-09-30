@@ -33,7 +33,21 @@ async def test_admin_role_via_web_client_cannot_list_users(
 
     response = await client.get("/v1/users/", headers=auth_header(token))
 
-    assert response.status_code == 403
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_mobile_client_cannot_list_users(
+    client: AsyncClient, register, login, auth_header, promote_to_admin
+) -> None:
+    await register("admin-mobile@example.com")
+    await promote_to_admin("admin-mobile@example.com")
+    token = await login("admin-mobile@example.com", client_type="mobile")
+
+    response = await client.get("/v1/users/", headers=auth_header(token))
+
+    assert response.status_code == 404
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -46,4 +60,17 @@ async def test_visitor_cannot_list_users(
 
     response = await client.get("/v1/users/", headers=auth_header(token))
 
-    assert response.status_code == 403
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_non_admin_with_admin_client_token_cannot_list_users(
+    client: AsyncClient, register, login, auth_header
+) -> None:
+    await register("admin@example.com")
+    await register("visitor-admin-client@example.com")
+    token = await login("visitor-admin-client@example.com", client_type="admin")
+
+    response = await client.get("/v1/users/", headers=auth_header(token))
+
+    assert response.status_code == 404
