@@ -89,7 +89,7 @@ def _user_response(user: User) -> UserResponse:
 )
 async def get_user(
     user_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     _caller: Annotated[User, Depends(require_admin_permission("users:read"))],
 ) -> UserResponse:
     user = await get_user_by_id(session, user_id)
@@ -112,7 +112,7 @@ async def get_user(
 async def patch_user(
     user_id: uuid.UUID,
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     caller: Annotated[User, Depends(require_admin_permission("users:write"))],
 ) -> UserResponse:
     # The body is read here, after the admin guard, not declared as a
