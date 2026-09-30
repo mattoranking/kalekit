@@ -50,10 +50,13 @@ def test_non_dev_environments_reject_default_secret(
         _settings(env, secret)
 
 
-def test_default_secret_is_rejected_when_no_secret_is_configured() -> None:
+def test_default_secret_is_rejected_when_no_secret_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The case #163 is about: a deployment that forgets to set the
     secret at all falls back to the built-in default and must not boot.
     """
+    monkeypatch.delenv("KALEKIT_JWT_SECRET_KEY", raising=False)
     with pytest.raises(ValueError, match="placeholder"):
         Settings(_env_file=None, ENV=Environment.production)  # type: ignore[call-arg]
 

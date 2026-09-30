@@ -55,10 +55,13 @@ def test_non_dev_environments_reject_default_secret(
         _settings(env, secret)
 
 
-def test_default_secret_is_rejected_when_no_secret_is_configured() -> None:
+def test_default_secret_is_rejected_when_no_secret_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The case #163 is about: a deployment that forgets to set the
     secret at all falls back to the built-in default and must not boot.
     """
+    monkeypatch.delenv("KALEKIT_JWT_SECRET_KEY", raising=False)
     with pytest.raises(ValueError, match="placeholder"):
         Settings(_env_file=None, ENV=Environment.production)  # type: ignore[call-arg]
 
@@ -101,16 +104,24 @@ def test_non_dev_environments_accept_strong_previous_key(env: Environment) -> No
 
 
 @pytest.mark.parametrize("env", NON_DEV_ENVIRONMENTS)
-def test_rejected_secret_value_is_not_echoed_in_the_error(env: Environment) -> None:
+def test_rejected_error_does_not_echo_settings_secrets(env: Environment) -> None:
     """pydantic appends `input_value=<settings dict>` to validation errors,
-    truncated to its head and tail, and that tail can hold a real secret
-    (here the last field set) that ends up in deploy logs.
+    truncated to its head and tail, and the tail is whichever fields sit
+    last in the dict. Here that is the OAuth client secret, so a secret
+    that is not the rejected one would still end up in deploy logs.
     """
-    secret = "Rk9vQmFyQmF6UXV4MTIzNDU2"  # 24 bytes: fails the length check
+    oauth_secret = "tw-client-secret-Zx81QpLm9Vc4"
 
     with pytest.raises(ValueError) as excinfo:
-        _settings(env, secret)
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            ENV=env,
+            JWT_SECRET_KEY="Rk9vQmFyQmF6UXV4MTIzNDU2",  # 24 bytes: too short
+            TWITTER_CLIENT_SECRET=oauth_secret,
+        )
 
-    assert "too short" in str(excinfo.value)
-    assert secret not in str(excinfo.value)
-    assert "input_value" not in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "too short" in message
+    # pydantic truncates the echoed value, so look for its tail end.
+    assert oauth_secret[-12:] not in message
+    assert "input_value" not in message
