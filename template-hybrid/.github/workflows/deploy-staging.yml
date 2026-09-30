@@ -110,13 +110,23 @@ jobs:
           ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
           CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
           API_DOMAIN: ${{ secrets.STAGING_API_DOMAIN }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          JWT_ISSUER: ${{ vars.JWT_ISSUER || 'kalekit-staging' }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
-          envs: BACKEND_IMG,DEPLOY_SHA,CR_PAT,GH_ACTOR,KALEKIT_POSTGRES_USER,KALEKIT_POSTGRES_PWD,KALEKIT_POSTGRES_STAGING_DATABASE,GEMINI_API_KEY,ACME_EMAIL,CORS_ORIGINS,API_DOMAIN
+          envs: BACKEND_IMG,DEPLOY_SHA,CR_PAT,GH_ACTOR,KALEKIT_POSTGRES_USER,KALEKIT_POSTGRES_PWD,KALEKIT_POSTGRES_STAGING_DATABASE,GEMINI_API_KEY,ACME_EMAIL,CORS_ORIGINS,API_DOMAIN,JWT_SECRET_KEY,JWT_ISSUER
           script: |
             set -e
+
+            # Fail before touching anything if the JWT secret is missing or
+            # too short: the backend refuses to start outside development and
+            # testing with a weak secret. The value is never printed.
+            if [ "${#JWT_SECRET_KEY}" -lt 32 ]; then
+              echo "ERROR: the JWT_SECRET_KEY environment secret is missing or shorter than 32 characters"
+              exit 1
+            fi
 
             # ---- Ensure shared Traefik is running ----
             TRAEFIK_DIR=/home/deploy/opt/kalekit/traefik
@@ -198,6 +208,21 @@ jobs:
                   timeout: 5s
                   retries: 5
 
+              redis:
+                image: redis:7-alpine
+                container_name: kalekit_redis_staging
+                command: ["redis-server", "--appendonly", "yes"]
+                volumes:
+                  - redis_data:/data
+                networks:
+                  - internal
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD", "redis-cli", "ping"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
               backend:
                 image: ${BACKEND_IMG}
                 environment:
@@ -209,11 +234,17 @@ jobs:
                   KALEKIT_POSTGRES_DATABASE: ${KALEKIT_POSTGRES_STAGING_DATABASE}
                   KALEKIT_CORS_ORIGINS: ${CORS_ORIGINS}
                   KALEKIT_ALLOWED_HOSTS: ${API_DOMAIN},localhost,127.0.0.1
+                  KALEKIT_JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+                  KALEKIT_JWT_ISSUER: ${JWT_ISSUER}
+                  KALEKIT_REDIS_URL: redis://redis:6379/0
+                  KALEKIT_TRUST_PROXY_HEADERS: "true"
                   GEMINI_API_KEY: ${GEMINI_API_KEY}
                 expose:
                   - "8000"
                 depends_on:
                   db:
+                    condition: service_healthy
+                  redis:
                     condition: service_healthy
                 networks:
                   - internal
@@ -242,6 +273,7 @@ jobs:
 
             volumes:
               postgres_data:
+              redis_data:
 
             networks:
               internal:
@@ -250,7 +282,8 @@ jobs:
                 external: true
             COMPOSE
 
-            # Write .env file
+            # Write .env file (owner-readable only; it holds secrets)
+            install -m 600 /dev/null .env
             cat > .env <<EOF
             KALEKIT_POSTGRES_USER=${KALEKIT_POSTGRES_USER}
             KALEKIT_POSTGRES_PWD=${KALEKIT_POSTGRES_PWD}
@@ -258,6 +291,8 @@ jobs:
             GEMINI_API_KEY=${GEMINI_API_KEY}
             CORS_ORIGINS=${CORS_ORIGINS}
             API_DOMAIN=${API_DOMAIN}
+            JWT_SECRET_KEY=${JWT_SECRET_KEY}
+            JWT_ISSUER=${JWT_ISSUER}
             BACKEND_IMG=${BACKEND_IMG}
             DEPLOY_SHA=${DEPLOY_SHA}
             EOF
@@ -268,8 +303,9 @@ jobs:
             # Pull latest image
             docker compose pull backend
 
-            # Ensure DB is running and healthy
-            docker compose up -d --wait db
+            # Ensure DB and Redis are running and healthy (the backend below
+            # is started with --no-deps, so compose won't start them for it)
+            docker compose up -d --wait db redis
 
             # ---- Zero-downtime blue-green deployment ----
             SHORT_SHA=$(echo "${DEPLOY_SHA}" | cut -c1-6)
@@ -341,7 +377,8 @@ jobs:
             if docker compose exec backend python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" 2>/dev/null; then
               echo "Staging backend is healthy!"
             else
-              echo "Health check failed"
-              docker compose logs --tail=20
+              # Container logs are deliberately not printed: this repo is public
+              # and outside production the app prints email links to the console.
+              echo "Health check failed. Inspect the backend logs on the host over SSH."
               exit 1
             fi
