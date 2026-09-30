@@ -8,6 +8,7 @@ from kalekit.models.user import User
 from kalekit.postgres import get_db_session
 from kalekit.user.repository import get_users
 from kalekit.user.schemas import UserListResponse, UserResponse
+from kalekit.user.sorting import DEFAULT_USER_SORT, UserSort
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -25,8 +26,25 @@ async def list_users(
     _caller: Annotated[User, Depends(require_admin_permission("users:read"))],
     page: Annotated[int, Query(ge=1)] = 1,
     size: Annotated[int, Query(ge=1, le=100)] = 20,
+    q: Annotated[
+        str | None,
+        Query(max_length=255, description="Case-insensitive email substring"),
+    ] = None,
+    role: Annotated[
+        str | None, Query(max_length=50, description="Role name held")
+    ] = None,
+    is_active: bool | None = None,
+    sort: UserSort = DEFAULT_USER_SORT,
 ) -> UserListResponse:
-    users, total = await get_users(session, page=page, size=size)
+    users, total = await get_users(
+        session,
+        page=page,
+        size=size,
+        q=q,
+        role=role,
+        is_active=is_active,
+        sort=sort,
+    )
     return UserListResponse(
         items=[
             UserResponse(
