@@ -11,22 +11,16 @@ from kalekit.auth.repository import (
     bump_token_version,
     revoke_user_refresh_tokens,
 )
-from kalekit.auth.seed import ADMIN_ROLE
 from kalekit.models.user import User
 from kalekit.postgres import get_db_session
-from kalekit.user.repository import (
-    get_roles_by_name,
-    get_user_by_id,
-    get_users,
-    update_user,
-)
+from kalekit.user.repository import get_user_by_id, get_users, update_user
 from kalekit.user.schemas import (
     UserListResponse,
     UserResponse,
     UserRolesUpdate,
     UserUpdate,
 )
-from kalekit.user.service import ensure_not_last_active_admin, replace_user_roles
+from kalekit.user.service import change_user_roles, ensure_not_last_active_admin
 from kalekit.user.sorting import DEFAULT_USER_SORT, UserSort
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -186,34 +180,7 @@ async def put_user_roles(
     except ValidationError as exc:
         raise RequestValidationError(exc.errors()) from exc
 
-    user = await get_user_by_id(session, user_id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    wanted_names = set(body.roles)
-    roles = await get_roles_by_name(session, wanted_names)
-    unknown = sorted(wanted_names - {role.name for role in roles})
-    if unknown:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Unknown role(s): {', '.join(unknown)}",
-        )
-
-    holds_admin = ADMIN_ROLE in {ur.role.name for ur in user.roles}
-    if holds_admin and ADMIN_ROLE not in wanted_names:
-        if user.id == caller.id:
-            raise HTTPException(
-                status_code=409,
-                detail="You cannot remove your own admin role",
-            )
-        await ensure_not_last_active_admin(session, user)
-
-    # TODO(#219): record_event(...)
-    if await replace_user_roles(session, user, roles):
-        # The user's tokens carry the old `scopes` claim, so the version
-        # bump cuts them off at once; the next login gets the new scopes.
-        # No invalidate_role_cache: that cache holds what each role may
-        # do, which did not change, and the user's roles are re-read on
-        # every request. No user-wide Redis block either: #229 removed it.
-        await bump_token_version(session, user)
+    user = await change_user_roles(
+        session, caller=caller, user_id=user_id, role_names=set(body.roles)
+    )
     return _user_response(user)
