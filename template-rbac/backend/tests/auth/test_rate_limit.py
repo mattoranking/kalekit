@@ -10,6 +10,8 @@ test here explicitly re-enables it and dials the relevant threshold down
 so it can be exercised in a handful of requests.
 """
 
+import asyncio
+
 import pytest
 from fastapi import Request
 from httpx import AsyncClient
@@ -167,13 +169,58 @@ async def test_account_lockout_recovers_when_its_redis_key_loses_its_ttl(
         json={"email": "ttl-recovery@example.com", "password": "correct-password"},
     )
     assert blocked.status_code == 429
-    # The peek path must have re-armed the TTL instead of leaving it
+    # check_and_increment must have re-armed the TTL instead of leaving it
     # at -1 forever. Checked against -1 rather than "> 0": with a
     # 1-second window, Redis's TTL can legitimately have already
     # rounded down to 0 by the time this assertion runs, which isn't a
     # sign of a bug -- only "still has no expiry at all" is (round-4
     # Copilot finding on PR #88).
     assert await r.ttl(account_key) != -1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_parallel_wrong_passwords_are_capped_by_the_account_limit(
+    client: AsyncClient, register, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test (issue #201): the account count used to be read
+    before the password check and incremented only after a failure, so
+    a burst of parallel guesses all read the old count and all got a
+    real password check. With a limit of 3, 10 simultaneous wrong
+    passwords must reach the password check exactly 3 times; the other
+    7 get 429."""
+    import kalekit.auth.endpoints as auth_endpoints
+
+    monkeypatch.setattr(settings, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_ACCOUNT", 3)
+    monkeypatch.setattr(settings, "LOGIN_RATE_LIMIT_PER_IP", 1000)
+
+    await register("parallel-guess@example.com", "correct-password")
+
+    real_verify_password = auth_endpoints.verify_password
+    password_checks = 0
+
+    def counting_verify_password(*args, **kwargs):
+        nonlocal password_checks
+        password_checks += 1
+        return real_verify_password(*args, **kwargs)
+
+    monkeypatch.setattr(auth_endpoints, "verify_password", counting_verify_password)
+
+    responses = await asyncio.gather(
+        *(
+            client.post(
+                "/v1/auth/login",
+                json={
+                    "email": "parallel-guess@example.com",
+                    "password": f"wrong-{i}",
+                },
+            )
+            for i in range(10)
+        )
+    )
+
+    assert sorted(r.status_code for r in responses) == [401] * 3 + [429] * 7
+    assert password_checks == 3
 
 
 @pytest.mark.asyncio(loop_scope="session")
