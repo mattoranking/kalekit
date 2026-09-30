@@ -18,7 +18,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.get("/", response_model=ChatMessageListResponse)
 async def get_messages(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     _caller: Annotated[User, Depends(require_permission("posts:read"))],
 ) -> ChatMessageListResponse:
     messages, total = await list_messages(session)
@@ -31,7 +31,7 @@ async def get_messages(
 @router.post("/", response_model=ChatMessageResponse, status_code=201)
 async def post_message(
     body: ChatMessageCreate,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     caller: Annotated[User, Depends(require_permission("posts:write"))],
 ) -> ChatMessageResponse:
     message = await create_message(session, user_id=caller.id, content=body.content)

@@ -18,7 +18,7 @@ router = APIRouter(prefix="/users", tags=["users"])
     summary="Retrieve all users paginated",
 )
 async def list_users(
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     # Back-office capability (listing every user): needs `users:read`
     # AND a token minted by the admin client (#6). Anyone else gets a
     # 404 so the route looks absent (#222).

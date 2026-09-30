@@ -115,7 +115,7 @@ def _rate_limited(retry_after_seconds: int) -> HTTPException:
 async def register(
     body: RegisterRequest,
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     if settings.RATE_LIMIT_ENABLED:
         with rate_limit_fails_open("register"):
@@ -190,7 +190,7 @@ async def _issue_and_send_verification_token(
 async def login(
     body: LoginRequest,
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     r = None
     # Keyed on the submitted email, lowercased -- not on the resolved
@@ -374,7 +374,7 @@ def _reauth_unavailable() -> HTTPException:
 async def refresh(
     body: RefreshRequest,
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     presented_hash = hash_refresh_token(body.refresh_token)
     # Row-locked: the lock is held until get_db_session commits, which
@@ -539,7 +539,7 @@ async def refresh(
 async def logout(
     user: Annotated[User, Depends(get_current_user)],
     jti: Annotated[str, Depends(get_current_jti)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
     body: LogoutRequest,
 ):
     # Only the family tied to *this* session's refresh token is
@@ -566,7 +566,7 @@ async def logout(
 async def logout_all(
     user: Annotated[User, Depends(get_current_user)],
     jti: Annotated[str, Depends(get_current_jti)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """End every session for this user, on every client/device."""
     await revoke_user_refresh_tokens(session, user.id)
@@ -587,7 +587,7 @@ async def logout_all(
 async def list_sessions(
     user: Annotated[User, Depends(get_current_user)],
     session_id: Annotated[str | None, Depends(get_current_session_id)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """List the caller's active sessions (one entry per live token
     family), most recently used first, with the one behind this
@@ -613,7 +613,7 @@ async def list_sessions(
 async def revoke_session(
     session_id: uuid.UUID,
     user: Annotated[User, Depends(require_recent_auth())],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """Revoke one of the caller's own sessions (a refresh token
     family). 404s for a family that doesn't exist *or* belongs to
@@ -640,7 +640,7 @@ async def change_password(
     body: ChangePasswordRequest,
     user: Annotated[User, Depends(require_recent_auth())],
     session_id: Annotated[str | None, Depends(get_current_session_id)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """Change the caller's password and sign out every other session,
     keeping the one this request was made from alive -- a changed
@@ -705,7 +705,7 @@ async def reauthenticate(
     body: ReauthenticateRequest,
     user: Annotated[User, Depends(get_current_user)],
     session_id: Annotated[str | None, Depends(get_current_session_id)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """Step-up re-authentication (#16): prove identity again, right now,
     without ending or rotating the caller's existing session -- this is
@@ -839,7 +839,7 @@ async def me(user: Annotated[User, Depends(get_current_user)]):
 @router.post("/verify-email", response_model=MessageResponse)
 async def verify_email(
     body: VerifyEmailRequest,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     token = await get_valid_verification_token(
         session, hash_verification_token(body.token)
@@ -864,7 +864,7 @@ async def verify_email(
 @router.post("/resend-verification", response_model=MessageResponse)
 async def resend_verification(
     user: Annotated[User, Depends(get_current_user)],
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     if user.email_verified:
         return MessageResponse(detail="Email already verified")
@@ -924,7 +924,7 @@ async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
     background_tasks: BackgroundTasks,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """Always answers 202 with the same body, whether or not `email`
     belongs to a real, active account -- see `_FORGOT_PASSWORD_RESPONSE`.
@@ -1003,7 +1003,7 @@ async def forgot_password(
 async def reset_password(
     body: ResetPasswordRequest,
     request: Request,
-    session: Annotated[AsyncSession, Depends(get_db_session)],
+    session: Annotated[AsyncSession, Depends(get_db_session, scope="function")],
 ):
     """Redeems a token minted by `/auth/password/forgot`: sets the new
     password and revokes every existing session for the account.
