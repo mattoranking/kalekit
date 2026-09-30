@@ -308,3 +308,65 @@ async def test_patch_unknown_user_is_404(
     )
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_reactivation_does_not_revive_old_refresh_token(
+    client: AsyncClient, register, login, auth_header, admin
+) -> None:
+    _, admin_token = admin
+    await register("bob@example.com")
+    bob_id = await _user_id(client, login, auth_header, "bob@example.com")
+    login_response = await client.post(
+        "/v1/auth/login",
+        json={"email": "bob@example.com", "password": "password12345"},
+    )
+    old_refresh = login_response.json()["refresh_token"]
+
+    for active in (False, True):
+        response = await client.patch(
+            f"/v1/users/{bob_id}",
+            headers=auth_header(admin_token),
+            json={"is_active": active},
+        )
+        assert response.status_code == 200
+
+    refreshed = await client.post(
+        "/v1/auth/refresh", json={"refresh_token": old_refresh}
+    )
+    assert refreshed.status_code == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("client_type", ["web", "admin"])
+async def test_malformed_json_from_non_admin_is_404(
+    client: AsyncClient, register, login, auth_header, admin, client_type
+) -> None:
+    """The guard must run before the body is parsed, or a 422 tells a
+    non-admin that the route exists."""
+    uid, _ = admin
+    await register("visitor@example.com")
+    token = await login("visitor@example.com", client_type=client_type)
+
+    response = await client.patch(
+        f"/v1/users/{uid}",
+        headers={**auth_header(token), "Content-Type": "application/json"},
+        content="{not json",
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_malformed_json_from_admin_is_422(
+    client: AsyncClient, auth_header, admin
+) -> None:
+    uid, token = admin
+
+    response = await client.patch(
+        f"/v1/users/{uid}",
+        headers={**auth_header(token), "Content-Type": "application/json"},
+        content="{not json",
+    )
+
+    assert response.status_code == 422
