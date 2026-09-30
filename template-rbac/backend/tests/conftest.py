@@ -1,5 +1,6 @@
 from collections.abc import AsyncGenerator
 from typing import Callable, Coroutine
+from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
@@ -26,6 +27,14 @@ async def clear_redis() -> AsyncGenerator[None]:
     """
     from kalekit.auth.permissions import get_redis
 
+    # Never flush Redis db 0: that is the index the dev app uses (and it
+    # holds its logged-out-token blocklist). .env.testing points tests at
+    # a dedicated index; refuse to run if something overrides it back.
+    db = urlparse(settings.REDIS_URL).path.lstrip("/") or "0"
+    assert db != "0", (
+        "tests would flush Redis db 0; set KALEKIT_REDIS_URL to a "
+        "dedicated test index (see .env.testing)"
+    )
     redis = await get_redis()
     await redis.flushdb()
     yield
