@@ -28,6 +28,7 @@ from kalekit.auth.permissions import (
     get_scopes_for_roles,
 )
 from kalekit.auth.repository import (
+    bump_token_version,
     claim_password_reset_token,
     create_password_reset_token,
     create_user,
@@ -275,6 +276,7 @@ async def login(
     access_token = create_access_token(
         str(user.id),
         list(scopes),
+        token_version=user.token_version,
         client=body.client,
         session_id=str(token_row.family_id),
     )
@@ -316,17 +318,43 @@ def _revocation_unavailable(event: str) -> JSONResponse:
     normal response lets it commit. Call from inside an `except
     RedisError` block so the traceback is attached to the log.
 
-    The commit is the intended outcome on every caller (#177), including
-    change-password and password reset: the new password and the revoked
-    refresh tokens stay in force, so an attacker is locked out of every
-    session that can still mint tokens even while Redis is down. Only
-    access tokens already issued live on, for at most their lifetime.
+    Only per-token blocks use this now (logout, revoke-session, reuse
+    detection). Logout-all, change-password and password reset cut off
+    access tokens through `User.token_version` in the database, so their
+    Redis failures are only logged (see `_log_redis_block_failure`, #195).
     """
     logger.warning(event, exc_info=True)
     return JSONResponse(
         status_code=503,
         content={"detail": "Could not complete sign-out, please try again"},
     )
+
+
+def _log_redis_block_failure(event: str) -> None:
+    """Log a failed Redis block whose effect the database already
+    guarantees (#195). Call from inside an `except RedisError` block so
+    the traceback is attached.
+
+    Used where the session is dead in the database regardless of Redis:
+    the refresh refusals (the family is revoked) and the endpoints that
+    bump `User.token_version` (logout-all, change-password, password
+    reset). The caller returns its normal response instead of a 503,
+    because a "try again" would mislead: a retry can't finish anything
+    (the password is already changed, the reset token already spent).
+    Per-token blocks (logout, revoke-session, reuse detection) have no
+    database counterpart and keep `_revocation_unavailable`.
+    """
+    logger.warning(event, exc_info=True)
+
+
+async def _block_family_after_refusal(family_id: uuid.UUID) -> None:
+    """Best-effort Redis block for a refresh that was refused and whose
+    family is already revoked in the database (#195). A Redis failure is
+    logged and the caller raises its normal 401."""
+    try:
+        await block_family_tokens(str(family_id))
+    except RedisError:
+        _log_redis_block_failure("refresh_family_block_failed")
 
 
 def _reauth_unavailable() -> HTTPException:
@@ -448,7 +476,7 @@ async def refresh(
         # family, rather than let an unhandled ValueError surface as a
         # 500. See the round-2 Copilot review on PR #75.
         await _revoke_family_and_commit(session, token_row.family_id)
-        await block_family_tokens(str(token_row.family_id))
+        await _block_family_after_refusal(token_row.family_id)
         raise HTTPException(status_code=401, detail="Refresh token invalid")
 
     # The absolute timeout: a session ends this long after the
@@ -465,7 +493,7 @@ async def refresh(
         and now - token_row.family_created_at > absolute_timeout
     ):
         await _revoke_family_and_commit(session, token_row.family_id)
-        await block_family_tokens(str(token_row.family_id))
+        await _block_family_after_refusal(token_row.family_id)
         raise HTTPException(status_code=401, detail="Session expired")
 
     user = await session.get(User, token_row.user_id)
@@ -475,7 +503,11 @@ async def refresh(
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
     new_access = create_access_token(
-        str(user.id), list(scopes), client=client, session_id=str(token_row.family_id)
+        str(user.id),
+        list(scopes),
+        token_version=user.token_version,
+        client=client,
+        session_id=str(token_row.family_id),
     )
     new_refresh, new_expires_at = generate_refresh_token(client)
 
@@ -538,15 +570,17 @@ async def logout_all(
 ):
     """End every session for this user, on every client/device."""
     await revoke_user_refresh_tokens(session, user.id)
-    # Blanket-block every access token this user currently holds, not
-    # just the one used to call this endpoint -- otherwise another
-    # device's still-valid access token would keep working until it
-    # naturally expires, even though its refresh token is now dead.
+    # The database cut-off: every access token issued under the old
+    # version, on any device, is rejected by get_current_user from the
+    # next request, with or without Redis (#195).
+    await bump_token_version(session, user)
+    # The Redis blocks stay as a second layer, but a failure here is only
+    # logged: the version bump above already covers every token.
     try:
         await block_all_user_tokens(str(user.id))
         await block_token(jti)
     except RedisError:
-        return _revocation_unavailable("logout_all_block_failed")
+        _log_redis_block_failure("logout_all_block_failed")
 
 
 @router.get("/sessions", response_model=SessionListResponse)
@@ -619,6 +653,11 @@ async def change_password(
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
     await update_user_password(session, user, body.new_password)
+    # Cuts off every access token issued so far, the caller's own
+    # included (#195). The caller's session survives: its refresh token
+    # family is spared below, so one /auth/refresh mints a token under
+    # the new version. Same transaction as the password change.
+    await bump_token_version(session, user)
 
     # `sid` is best-effort: treat a missing *or* malformed claim the
     # same way -- as "no session tied to this token" -- rather than
@@ -636,7 +675,9 @@ async def change_password(
     try:
         await block_families_tokens(str(family_id) for family_id in revoked_families)
     except RedisError:
-        return _revocation_unavailable("change_password_block_failed")
+        # Logged, not a 503: the password change and the version bump are
+        # committed and cut off the other sessions' access tokens.
+        _log_redis_block_failure("change_password_block_failed")
 
     if keep_family_id is None:
         # The caller's own access token has no (usable) session id, so
@@ -654,7 +695,7 @@ async def change_password(
         try:
             await block_all_user_tokens(str(user.id))
         except RedisError:
-            return _revocation_unavailable("change_password_block_failed")
+            _log_redis_block_failure("change_password_block_failed")
 
     return MessageResponse(detail="Password changed")
 
@@ -1014,9 +1055,13 @@ async def reset_password(
     # already-minted one doesn't keep working for the rest of its
     # natural lifetime despite its refresh token now being dead.
     await revoke_user_refresh_tokens(session, user.id)
+    await bump_token_version(session, user)
     try:
         await block_all_user_tokens(str(user.id))
     except RedisError:
-        return _revocation_unavailable("password_reset_block_failed")
+        # Logged, not a 503: the reset is committed and the version bump
+        # cuts off every access token. A retry could not finish anything,
+        # the reset token is already spent.
+        _log_redis_block_failure("password_reset_block_failed")
 
     return MessageResponse(detail="Password reset")

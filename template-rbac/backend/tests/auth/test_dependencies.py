@@ -57,6 +57,7 @@ def _make_token_with_raw_header(header: dict[str, Any], key: str) -> str:
         "jti": "jti-1",
         "scopes": ["read"],
         "type": "access",
+        "ver": 0,
         "exp": int((datetime.now(timezone.utc) + timedelta(minutes=15)).timestamp()),
         "aud": ClientType.web.value,
         "iss": settings.JWT_ISSUER,
@@ -90,6 +91,7 @@ def _make_token(
         "jti": "jti-1",
         "scopes": ["read"],
         "type": token_type,
+        "ver": 0,
         "exp": datetime.now(timezone.utc) + exp_delta,
     }
     for claim in omit:
@@ -108,6 +110,15 @@ def test_decode_accepts_a_validly_signed_current_token() -> None:
     payload = _decode_access_token(_credentials(token))
 
     assert payload["sub"] == "user-1"
+
+
+def test_decode_rejects_a_token_without_a_version_claim() -> None:
+    token = _make_token(omit=("ver",))
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_access_token(_credentials(token))
+
+    assert exc_info.value.status_code == 401
 
 
 def test_decode_rejects_expired_token() -> None:

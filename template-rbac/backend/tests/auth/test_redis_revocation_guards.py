@@ -1,20 +1,17 @@
-"""Redis outage behaviour for the four session-revoking endpoints #108
-left unguarded (#177): logout-all, DELETE /sessions/{id}, change-password
-and password reset.
+"""Redis outage behaviour for the session-revoking endpoints #108 left
+unguarded (#177): logout-all, DELETE /sessions/{id}, change-password and
+password reset.
 
-When the blocklist write fails each returns the same clean 503 as
-logout, never a 500 and never a success. The database changes made
-before the failed block are COMMITTED, not rolled back:
+DELETE /sessions/{id} revokes one session and has no database cut-off
+for its access tokens, so when the blocklist write fails it returns the
+same clean 503 as logout (#99, #108).
 
-* the refresh tokens stay revoked, so the sessions cannot mint new
-  access tokens; only access tokens already issued live on, for at most
-  their natural lifetime;
-* on change-password and reset the new password stays in force, so an
-  attacker holding the old password or the reset-triggering session is
-  locked out.
-
-Rolling back would leave the old password and every refresh token alive
-for as long as Redis is down.
+Logout-all, change-password and password reset bump
+`users.token_version` in the same transaction (#195), which rejects
+every older access token without Redis. A Redis failure there is logged
+and the endpoint returns its normal success; the tests below check the
+database changes are committed. The cut-off itself is tested in
+test_token_version_cutoff.py.
 """
 
 from typing import Any
@@ -91,7 +88,7 @@ async def _refresh_status(client: AsyncClient, refresh_token: str) -> int:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_logout_all_returns_503_and_keeps_the_refresh_revocation(
+async def test_logout_all_succeeds_and_keeps_the_refresh_revocation(
     client: AsyncClient, register, auth_header, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     email = "logout-all-outage@example.com"
@@ -105,19 +102,10 @@ async def test_logout_all_returns_503_and_keeps_the_refresh_revocation(
             "/v1/auth/logout-all", headers=auth_header(first["access_token"])
         )
 
-    assert response.status_code == 503
-    assert response.json() == _DETAIL
+    assert response.status_code == 204
     # The revocation committed: neither session can refresh.
     assert await _refresh_status(client, first["refresh_token"]) == 401
     assert await _refresh_status(client, second["refresh_token"]) == 401
-
-    # A retry with Redis back finishes the job.
-    retry = await client.post(
-        "/v1/auth/logout-all", headers=auth_header(first["access_token"])
-    )
-    assert retry.status_code == 204
-    me = await client.get("/v1/auth/me", headers=auth_header(second["access_token"]))
-    assert me.status_code == 401
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -153,7 +141,7 @@ async def test_revoke_session_returns_503_and_keeps_the_refresh_revocation(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_change_password_returns_503_and_keeps_the_change_and_revocation(
+async def test_change_password_succeeds_and_keeps_the_change_and_revocation(
     client: AsyncClient, register, auth_header, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     email = "change-pw-outage@example.com"
@@ -169,8 +157,7 @@ async def test_change_password_returns_503_and_keeps_the_change_and_revocation(
             json={"current_password": _OLD, "new_password": _NEW},
         )
 
-    assert response.status_code == 503
-    assert response.json() == _DETAIL
+    assert response.status_code == 200
     # The new password is in force and the old one is dead...
     bad = await client.post("/v1/auth/login", json={"email": email, "password": _OLD})
     assert bad.status_code == 401
@@ -182,7 +169,7 @@ async def test_change_password_returns_503_and_keeps_the_change_and_revocation(
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_password_reset_returns_503_and_keeps_the_reset_and_revocation(
+async def test_password_reset_succeeds_and_keeps_the_reset_and_revocation(
     client: AsyncClient,
     register,
     session: AsyncSession,
@@ -208,8 +195,7 @@ async def test_password_reset_returns_503_and_keeps_the_reset_and_revocation(
             json={"token": raw_token, "new_password": _NEW},
         )
 
-    assert response.status_code == 503
-    assert response.json() == _DETAIL
+    assert response.status_code == 200
     bad = await client.post("/v1/auth/login", json={"email": email, "password": _OLD})
     assert bad.status_code == 401
     await _login(client, email, _NEW)

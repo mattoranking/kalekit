@@ -36,6 +36,21 @@ async def create_user(
     return user
 
 
+async def bump_token_version(session: AsyncSession, user: User) -> None:
+    """Invalidate every access token issued to `user` so far.
+
+    An atomic `token_version = token_version + 1` in SQL, not a Python
+    read-modify-write, so two concurrent security actions can't both
+    write the same new value. Runs in the caller's transaction, so the
+    bump commits or rolls back together with the password change and
+    refresh-token revocation it accompanies. Reloads the attribute so
+    the in-memory `user` matches the row.
+    """
+    user.token_version = User.token_version + 1
+    await session.flush()
+    await session.refresh(user, ["token_version"])
+
+
 async def update_user_password(
     session: AsyncSession, user: User, new_password: str
 ) -> None:

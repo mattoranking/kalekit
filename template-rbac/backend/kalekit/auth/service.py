@@ -81,6 +81,8 @@ def password_reset_token_expiry() -> datetime:
 def create_access_token(
     user_id: str,
     scopes: list[str],
+    *,
+    token_version: int,
     client: ClientType = ClientType.web,
     session_id: str | None = None,
 ) -> str:
@@ -92,6 +94,9 @@ def create_access_token(
         "jti": str(uuid.uuid4()),
         "scopes": scopes,
         "type": "access",
+        # User.token_version at issue time; get_current_user rejects the
+        # token once the user's counter has moved on (#195).
+        "ver": token_version,
         "exp": expire,
         # Which client this token was minted for -- see
         # kalekit.auth.client_type.ClientType and #6. Pinning it (rather
