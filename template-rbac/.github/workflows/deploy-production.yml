@@ -87,13 +87,24 @@ jobs:
           CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
           API_DOMAIN: ${{ secrets.API_DOMAIN }}
           DEPLOY_VERSION: ${{ needs.build-and-push.outputs.version }}
+          JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY }}
+          JWT_ISSUER: ${{ vars.JWT_ISSUER || 'kalekit-production' }}
         with:
           host: ${{ secrets.PRODUCTION_HOST }}
           username: ${{ secrets.PRODUCTION_USER }}
           key: ${{ secrets.PRODUCTION_SSH_KEY }}
-          envs: BACKEND_IMG,CR_PAT,GH_ACTOR,DB_USER,DB_PASSWORD,GEMINI_API_KEY,CORS_ORIGINS,API_DOMAIN,DEPLOY_VERSION
+          envs: BACKEND_IMG,CR_PAT,GH_ACTOR,DB_USER,DB_PASSWORD,GEMINI_API_KEY,CORS_ORIGINS,API_DOMAIN,DEPLOY_VERSION,JWT_SECRET_KEY,JWT_ISSUER
           script: |
             set -e
+
+            # Fail before writing any config if the JWT secret is missing or
+            # too short: the backend refuses to start outside development and
+            # testing with a weak secret. The value is never printed. The
+            # "Rollback on failure" step still runs after this exit.
+            if [ "${#JWT_SECRET_KEY}" -lt 32 ]; then
+              echo "ERROR: the JWT_SECRET_KEY environment secret is missing or shorter than 32 characters"
+              exit 1
+            fi
 
             # ---- Ensure shared Traefik is running ----
             TRAEFIK_DIR=/home/deploy/opt/kalekit/traefik
@@ -181,6 +192,21 @@ jobs:
                   timeout: 5s
                   retries: 5
 
+              redis:
+                image: redis:7-alpine
+                container_name: kalekit_redis_prod
+                command: ["redis-server", "--appendonly", "yes"]
+                volumes:
+                  - redis_data:/data
+                networks:
+                  - internal
+                restart: unless-stopped
+                healthcheck:
+                  test: ["CMD", "redis-cli", "ping"]
+                  interval: 10s
+                  timeout: 5s
+                  retries: 5
+
               backend:
                 image: ${BACKEND_IMG}
                 container_name: kalekit_backend_prod
@@ -193,11 +219,17 @@ jobs:
                   KALEKIT_POSTGRES_DATABASE: kalekit_prod
                   KALEKIT_CORS_ORIGINS: ${CORS_ORIGINS}
                   KALEKIT_ALLOWED_HOSTS: ${API_DOMAIN},localhost,127.0.0.1
+                  KALEKIT_JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+                  KALEKIT_JWT_ISSUER: ${JWT_ISSUER}
+                  KALEKIT_REDIS_URL: redis://redis:6379/0
+                  KALEKIT_TRUST_PROXY_HEADERS: "true"
                   GEMINI_API_KEY: ${GEMINI_API_KEY}
                 expose:
                   - "8000"
                 depends_on:
                   db:
+                    condition: service_healthy
+                  redis:
                     condition: service_healthy
                 networks:
                   - internal
@@ -229,6 +261,7 @@ jobs:
 
             volumes:
               postgres_data:
+              redis_data:
 
             networks:
               internal:
@@ -237,13 +270,16 @@ jobs:
                 external: true
             COMPOSE
 
-            # Write .env file
+            # Write .env file (owner-readable only; it holds secrets)
+            install -m 600 /dev/null .env
             cat > .env <<EOF
             DB_USER=${DB_USER}
             DB_PASSWORD=${DB_PASSWORD}
             GEMINI_API_KEY=${GEMINI_API_KEY}
             CORS_ORIGINS=${CORS_ORIGINS}
             API_DOMAIN=${API_DOMAIN}
+            JWT_SECRET_KEY=${JWT_SECRET_KEY}
+            JWT_ISSUER=${JWT_ISSUER}
             BACKEND_IMG=${BACKEND_IMG}
             EOF
 
@@ -252,7 +288,7 @@ jobs:
 
             # Pull and deploy
             docker compose pull backend
-            docker compose up -d --wait db
+            docker compose up -d --wait db redis
             docker compose up -d --force-recreate backend
 
             # Cleanup unused images older than 7 days
