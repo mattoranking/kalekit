@@ -31,6 +31,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import kalekit.auth.endpoints as auth_endpoints
 from kalekit.auth.client_type import ClientType
 from kalekit.auth.repository import (
+    bump_token_version,
+    carry_refresh_token_versions,
     create_password_reset_token,
     create_user,
     find_user_by_email,
@@ -168,15 +170,15 @@ async def _reset_password(engine: AsyncEngine, account: _Account) -> Response:
     )
 
 
-@pytest.mark.asyncio(loop_scope="session")
-@pytest.mark.parametrize("action", [_logout_all, _reset_password])
-async def test_a_token_minted_by_a_racing_refresh_is_refused_after_the_action(
+async def _race_refresh_with(
     engine: AsyncEngine,
-    committed_account: _Account,
+    account: _Account,
     monkeypatch: pytest.MonkeyPatch,
     action: Callable[[AsyncEngine, _Account], Coroutine[None, None, Response]],
-) -> None:
-    account = committed_account
+) -> str:
+    """Run `action` while a refresh of the account's token is in flight,
+    with the refresh's insert landing after the action's revoke snapshot.
+    Returns the refresh token the racing refresh minted."""
     reached_insert = asyncio.Event()
     release = asyncio.Event()
     real_store = auth_endpoints.store_refresh_token
@@ -206,21 +208,57 @@ async def test_a_token_minted_by_a_racing_refresh_is_refused_after_the_action(
     assert acted.status_code in (200, 204)
 
     # The racing refresh's new token was inserted after the action's
-    # snapshot, so it is still unrevoked in the database...
+    # snapshot, so it is still unrevoked in the database.
     async with AsyncSession(engine) as check:
         racing_row = await get_refresh_token_by_hash(
             check, hash_refresh_token(refreshed.json()["refresh_token"])
         )
         assert racing_row is not None
         assert racing_row.revoked is False
+    return refreshed.json()["refresh_token"]
 
-    # ...but it must not work.
-    again = await _post(
-        engine,
-        "/v1/auth/refresh",
-        json={"refresh_token": refreshed.json()["refresh_token"]},
+
+async def _refresh_status(engine: AsyncEngine, refresh_token: str) -> int:
+    response = await _post(
+        engine, "/v1/auth/refresh", json={"refresh_token": refresh_token}
     )
-    assert again.status_code == 401
+    return response.status_code
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("action", [_logout_all, _reset_password])
+async def test_a_token_minted_by_a_racing_refresh_is_refused_after_the_action(
+    engine: AsyncEngine,
+    committed_account: _Account,
+    monkeypatch: pytest.MonkeyPatch,
+    action: Callable[[AsyncEngine, _Account], Coroutine[None, None, Response]],
+) -> None:
+    racing_token = await _race_refresh_with(
+        engine, committed_account, monkeypatch, action
+    )
+
+    assert await _refresh_status(engine, racing_token) == 401
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_later_role_change_does_not_revive_a_token_the_race_left_behind(
+    engine: AsyncEngine,
+    committed_account: _Account,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    racing_token = await _race_refresh_with(
+        engine, committed_account, monkeypatch, _logout_all
+    )
+
+    # What change_user_roles does to the user's sessions.
+    async with AsyncSession(engine) as session:
+        user = await session.get(User, committed_account.user_id)
+        assert user is not None
+        await bump_token_version(session, user)
+        await carry_refresh_token_versions(session, user)
+        await session.commit()
+
+    assert await _refresh_status(engine, racing_token) == 401
 
 
 @pytest.mark.asyncio(loop_scope="session")

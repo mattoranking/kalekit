@@ -365,10 +365,15 @@ async def carry_refresh_token_versions(
     that revokes sessions: a row a racing refresh inserted after the
     revoke snapshot must keep its old version, which is what makes
     /auth/refresh refuse it.
+
+    Only rows at the version just replaced move. A row older than that
+    is a stale leftover of an earlier reset or logout-all race, and a
+    later role change must not bring it back to life.
     """
     conditions = [
         RefreshToken.user_id == user.id,
         RefreshToken.revoked == False,  # noqa: E712
+        RefreshToken.token_version == user.token_version - 1,
     ]
     if family_id is not None:
         conditions.append(RefreshToken.family_id == family_id)
