@@ -28,6 +28,7 @@ from kalekit.auth.permissions import (
 )
 from kalekit.auth.repository import (
     bump_token_version,
+    carry_refresh_token_versions,
     claim_password_reset_token,
     create_password_reset_token,
     create_user,
@@ -269,6 +270,7 @@ async def login(
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
         client=body.client,
+        token_version=user.token_version,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
@@ -499,6 +501,17 @@ async def refresh(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found")
 
+    # A row minted under an older token_version belongs to a session a
+    # password reset, logout-all or suspension meant to end (#240): a
+    # refresh racing that action inserted it after the revoke took its
+    # snapshot. Refuse it and kill the family, as for any untrusted
+    # session. `user` was read after the row lock above, so a refresh
+    # that starts after the action commits sees the new version.
+    if token_row.token_version < user.token_version:
+        await _revoke_family_and_commit(session, token_row.family_id)
+        await _block_family_after_refusal(token_row.family_id)
+        raise HTTPException(status_code=401, detail="Refresh token revoked")
+
     roles = [ur.role.name for ur in user.roles]
     scopes = await get_scopes_for_roles(session, roles)
     new_access = create_access_token(
@@ -519,6 +532,7 @@ async def refresh(
         token_hash=hash_refresh_token(new_refresh),
         expires_at=new_expires_at,
         client=client,
+        token_version=user.token_version,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
@@ -671,6 +685,9 @@ async def change_password(
     revoked_families = await revoke_user_refresh_tokens_except_family(
         session, user.id, keep_family_id
     )
+    if keep_family_id is not None:
+        # The caller's own session survives the version bump (#240).
+        await carry_refresh_token_versions(session, user, keep_family_id)
     try:
         await block_families_tokens(str(family_id) for family_id in revoked_families)
     except RedisError:

@@ -104,6 +104,7 @@ async def committed_refresh_token(engine: AsyncEngine) -> AsyncGenerator[str]:
             token_hash=hash_refresh_token(refresh_token),
             expires_at=expires_at,
             client=ClientType.web,
+            token_version=0,
         )
         await setup_session.commit()
         user_id = user.id

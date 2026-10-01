@@ -5,7 +5,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from kalekit.auth.repository import bump_token_version
+from kalekit.auth.repository import (
+    bump_token_version,
+    carry_refresh_token_versions,
+)
 from kalekit.auth.seed import ADMIN_ROLE, is_unique_violation
 from kalekit.models.role import Role, UserRole
 from kalekit.models.user import User
@@ -143,4 +146,7 @@ async def change_user_roles(
         # do, which did not change, and the user's roles are re-read on
         # every request. No user-wide Redis block either: #229 removed it.
         await bump_token_version(session, user)
+        # Sessions survive a role change, so their refresh tokens follow
+        # the new version (#240).
+        await carry_refresh_token_versions(session, user)
     return user

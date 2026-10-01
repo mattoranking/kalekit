@@ -358,6 +358,7 @@ async def test_prune_refresh_tokens_cli_deletes_old_dead_rows_and_reports_count(
                 token_hash=f"cli-prune-{uuid.uuid4().hex}",
                 expires_at=now + timedelta(days=30),
                 client=ClientType.web,
+                token_version=0,
             )
             token.revoked = True
             token.updated_at = now - timedelta(days=40)

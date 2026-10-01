@@ -339,6 +339,7 @@ async def oauth_callback(
         token_hash=hash_refresh_token(refresh_token),
         expires_at=expires_at,
         client=client_type,
+        token_version=user.token_version,
         ip_address=request.client.host if request.client else None,
         device_info=device_info_from_user_agent(request.headers.get("user-agent")),
     )
