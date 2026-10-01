@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from kalekit.api import router
+from kalekit.auth.seed import sync_default_roles
 from kalekit.config import settings
 from kalekit.health.endpoints import router as health_router
 from kalekit.logging import Logger, configure_logging
@@ -71,6 +72,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[State]:
 
     sync_engine = _create_sync_engine("kalekit")
     sync_sessionmaker = create_sync_sessionmaker(sync_engine)
+
+    await sync_default_roles(async_sessionmaker)
 
     log.info("Kalekit API Started...")
 

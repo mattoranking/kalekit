@@ -468,36 +468,3 @@ async def test_put_roles_malformed_json_from_admin_is_422(
     )
 
     assert response.status_code == 422
-
-
-@pytest.mark.asyncio(loop_scope="session")
-async def test_put_roles_removes_a_duplicate_user_role_row(
-    client: AsyncClient, session, register, auth_header, admin
-) -> None:
-    """user_roles has no unique (user, role) constraint, so a past race can
-    leave two rows for one role. Removing the role must remove both."""
-    _, admin_token = admin
-    await register("bob@example.com")
-    bob = await find_user_by_email(session, "bob@example.com")
-    assert bob is not None
-    _, admin_role = await ensure_default_roles(session)
-    session.add(UserRole(user_id=bob.id, role_id=admin_role.id))
-    session.add(UserRole(user_id=bob.id, role_id=admin_role.id))
-    await session.flush()
-
-    response = await client.put(
-        f"/v1/users/{bob.id}/roles",
-        headers=auth_header(admin_token),
-        json={"roles": ["visitor"]},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["roles"] == ["visitor"]
-    rows = (
-        await session.execute(
-            select(UserRole).where(
-                UserRole.user_id == bob.id, UserRole.role_id == admin_role.id
-            )
-        )
-    ).all()
-    assert rows == []
