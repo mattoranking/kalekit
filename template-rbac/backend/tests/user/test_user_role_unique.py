@@ -11,7 +11,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, insert, select
+from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -137,3 +137,41 @@ async def test_two_racing_replace_user_roles_both_succeed(
 
     async with AsyncSession(engine) as s:
         assert await _count(s, committed_user) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_replace_user_roles_removes_every_row_of_a_legacy_duplicate(
+    session: AsyncSession, register
+) -> None:
+    """A database created before the constraint can still hold two rows for
+    one (user, role). create_all does not add the constraint to an existing
+    table and there are no migrations, so removing the role must take both."""
+    await register("dup-legacy@example.com")
+    user = await find_user_by_email(session, "dup-legacy@example.com")
+    assert user is not None
+    visitor, admin = await ensure_default_roles(session)
+    # Rolled back with the test's transaction (Postgres DDL is transactional).
+    await session.execute(
+        text("ALTER TABLE user_roles DROP CONSTRAINT user_roles_user_id_role_id_key")
+    )
+    for _ in range(2):
+        await session.execute(
+            insert(UserRole).values(id=uuid.uuid4(), user_id=user.id, role_id=admin.id)
+        )
+    await session.refresh(user, ["roles"])
+
+    await replace_user_roles(session, user, [visitor])
+
+    assert {ur.role_id for ur in user.roles} == {visitor.id}
+    assert await _count(session, user.id) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_assign_role_does_not_swallow_a_foreign_key_failure(
+    session: AsyncSession,
+) -> None:
+    visitor, _ = await ensure_default_roles(session)
+    ghost = User(id=uuid.uuid4(), email="ghost@example.com")  # never inserted
+
+    with pytest.raises(IntegrityError):
+        await assign_role(session, ghost, visitor)

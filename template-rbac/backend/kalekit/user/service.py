@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import bump_token_version
-from kalekit.auth.seed import ADMIN_ROLE
+from kalekit.auth.seed import ADMIN_ROLE, is_unique_violation
 from kalekit.models.role import Role, UserRole
 from kalekit.models.user import User
 from kalekit.user.repository import get_roles_by_name, get_user_by_id
@@ -68,22 +68,29 @@ async def replace_user_roles(
     request added the row first. It is skipped (each insert runs in its own
     savepoint) and does not count as a change made here."""
     wanted = {role.id for role in new_roles}
-    current = {user_role.role_id: user_role for user_role in user.roles}
+    current: dict[uuid.UUID, UserRole] = {}
     changed = False
-    for role_id, user_role in current.items():
-        if role_id not in wanted:
+    for user_role in user.roles:
+        if user_role.role_id not in wanted:
+            # Every row of an unwanted role, duplicates included.
             await session.delete(user_role)
             changed = True
+        elif user_role.role_id in current:
+            # A database created before the unique (user, role) constraint
+            # (no migrations add it) may hold a second row. Drop it.
+            await session.delete(user_role)
+        else:
+            current[user_role.role_id] = user_role
     for role_id in wanted - set(current):
         try:
             async with session.begin_nested():
                 session.add(UserRole(user_id=user.id, role_id=role_id))
                 await session.flush()
             changed = True
-        except IntegrityError:
-            pass
-    if changed:
-        await session.flush()
+        except IntegrityError as exc:
+            if not is_unique_violation(exc):
+                raise
+    await session.flush()
     # Re-read always: a skipped insert leaves a row `user.roles` lacks.
     await session.refresh(user, ["roles"])
     return changed

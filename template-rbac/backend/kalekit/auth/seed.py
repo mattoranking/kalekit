@@ -330,6 +330,16 @@ async def sync_default_roles(sessionmaker: async_sessionmaker[AsyncSession]) -> 
         log.warning("role_cache_invalidation_at_startup_failed", exc_info=True)
 
 
+def is_unique_violation(exc: IntegrityError) -> bool:
+    """True when `exc` is a unique-constraint violation (SQLSTATE 23505),
+    false for other integrity errors such as a missing foreign-key row."""
+    orig = exc.orig
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(
+        orig.__cause__, "sqlstate", None
+    )
+    return sqlstate == "23505"
+
+
 async def assign_role(session: AsyncSession, user: User, role: Role) -> None:
     """Give `user` `role`. Does nothing when they already hold it, including
     when another request added the same row first: the insert runs in a
@@ -338,5 +348,6 @@ async def assign_role(session: AsyncSession, user: User, role: Role) -> None:
         async with session.begin_nested():
             session.add(UserRole(user_id=user.id, role_id=role.id))
             await session.flush()
-    except IntegrityError:
-        pass
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise
