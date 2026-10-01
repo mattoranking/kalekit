@@ -45,6 +45,7 @@ async def test_list_user_sessions_uses_the_latest_usable_rows_last_used_at(
         token_hash="hash-older",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
         family_id=family_id,
         family_created_at=NOW - timedelta(days=5),
         device_info="OlderDevice",
@@ -55,6 +56,7 @@ async def test_list_user_sessions_uses_the_latest_usable_rows_last_used_at(
         token_hash="hash-newer",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
         family_id=family_id,
         family_created_at=NOW - timedelta(days=5),
         device_info="NewerDevice",
@@ -102,6 +104,7 @@ async def test_list_user_sessions_ignores_dead_rows_within_a_live_family(
         token_hash="hash-revoked",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
         family_id=family_id,
         family_created_at=NOW - timedelta(days=2),
         device_info="RevokedDevice",
@@ -114,6 +117,7 @@ async def test_list_user_sessions_ignores_dead_rows_within_a_live_family(
         token_hash="hash-live",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
         family_id=family_id,
         family_created_at=NOW - timedelta(days=2),
         device_info="LiveDevice",
@@ -137,6 +141,7 @@ async def test_prune_refresh_tokens_deletes_old_revoked_rows(
         token_hash="hash-old-revoked",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
     )
     token.revoked = True
     token.updated_at = NOW - timedelta(days=40)
@@ -248,6 +253,7 @@ async def test_prune_refresh_tokens_keeps_recently_dead_rows(
         token_hash="hash-recent-revoked",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
     )
     token.revoked = True
     token.updated_at = NOW - timedelta(days=1)
@@ -304,6 +310,7 @@ async def test_prune_refresh_tokens_rejects_negative_window(
         token_hash="hash-negative-window",
         expires_at=NOW + timedelta(days=30),
         client=ClientType.web,
+        token_version=0,
     )
     token.revoked = True
     token.updated_at = NOW - timedelta(days=40)

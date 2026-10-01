@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from kalekit.utils.db.models import RecordModel
@@ -81,6 +81,17 @@ class RefreshToken(RecordModel):
     auth_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+
+    # The user's `token_version` when this row was minted (#240).
+    # /auth/refresh refuses a row older than the user's current version
+    # and revokes its family. That closes the race where a refresh
+    # inserts its new row after a password reset or logout-all took its
+    # revoke snapshot: the row carries the pre-reset version, so it is
+    # dead on first use. Flows that bump the version without ending
+    # sessions (role change, change-password for the caller's own
+    # family) move the surviving rows forward with
+    # kalekit.auth.repository.carry_refresh_token_versions.
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     revoked: Mapped[bool] = mapped_column(Boolean, default=False)
     device_info: Mapped[str | None] = mapped_column(String(255))

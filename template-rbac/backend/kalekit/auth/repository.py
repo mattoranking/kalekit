@@ -196,6 +196,7 @@ async def store_refresh_token(
     token_hash: str,
     expires_at: datetime,
     client: ClientType,
+    token_version: int,
     family_id: uuid.UUID | None = None,
     family_created_at: datetime | None = None,
     auth_time: datetime | None = None,
@@ -222,6 +223,10 @@ async def store_refresh_token(
     callback), where the column default ("now") is correct -- a fresh
     login/OAuth exchange *is* a fresh authentication.
 
+    `token_version` is the user's `token_version` as the caller read it
+    (see RefreshToken.token_version, #240). A rotation passes the value
+    it read together with the user, not a later re-read.
+
     `client` is a `ClientType`, not a raw string -- the DB column is a
     plain String (see RefreshToken.client), but taking a validated enum
     here rather than `str` makes "only a real client value ever reaches
@@ -234,6 +239,7 @@ async def store_refresh_token(
         token_hash=token_hash,
         expires_at=expires_at,
         client=client.value,
+        token_version=token_version,
         device_info=device_info,
         ip_address=ip_address,
         **({"family_id": family_id} if family_id is not None else {}),
@@ -343,6 +349,35 @@ async def revoke_refresh_token_family(
     for token in result.scalars():
         token.revoked = True
     await session.flush()
+
+
+async def carry_refresh_token_versions(
+    session: AsyncSession,
+    user: User,
+    family_id: uuid.UUID | None = None,
+) -> None:
+    """Move the user's active refresh tokens to the user's current
+    `token_version`, for a bump that must not end those sessions (#240).
+
+    Call it after `bump_token_version` when the sessions survive: a role
+    change (all of the user's sessions) or a password change (the
+    caller's own family, passed as `family_id`). Never call it on a path
+    that revokes sessions: a row a racing refresh inserted after the
+    revoke snapshot must keep its old version, which is what makes
+    /auth/refresh refuse it.
+    """
+    conditions = [
+        RefreshToken.user_id == user.id,
+        RefreshToken.revoked == False,  # noqa: E712
+    ]
+    if family_id is not None:
+        conditions.append(RefreshToken.family_id == family_id)
+    await session.execute(
+        update(RefreshToken)
+        .where(*conditions)
+        .values(token_version=user.token_version)
+        .execution_options(synchronize_session="fetch")
+    )
 
 
 async def revoke_user_refresh_tokens_except_family(
