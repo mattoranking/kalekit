@@ -1,15 +1,20 @@
 from functools import lru_cache
 from pathlib import Path
 
+import structlog
 import yaml
 from pydantic import BaseModel, model_validator
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from kalekit.auth.permissions import invalidate_role_caches
 from kalekit.auth.scope import SCOPES_SUPPORTED
 from kalekit.models.role import Permission, Role, RolePermission, UserRole
 from kalekit.models.user import User
+
+log = structlog.get_logger()
 
 VISITOR_ROLE = "visitor"
 ADMIN_ROLE = "admin"
@@ -298,6 +303,50 @@ async def ensure_default_roles(session: AsyncSession) -> tuple[Role, Role]:
     return roles[VISITOR_ROLE], roles[ADMIN_ROLE]
 
 
+async def sync_default_roles(sessionmaker: async_sessionmaker[AsyncSession]) -> None:
+    """Reconcile the roles in `roles.yaml` once, at app startup, so a
+    database seeded by an older version picks up new scopes on deploy
+    instead of at the next sign-up.
+
+    Runs `ensure_default_roles` in its own session and commits. Several
+    instances starting together are safe: that function takes each insert
+    through a savepoint and re-selects when another instance won the
+    unique constraint, and every instance inserts in the same order, so
+    they wait on each other and cannot deadlock.
+
+    `ensure_default_roles` does not report which roles changed, so after
+    the commit this drops the cached permissions of every role in
+    `roles.yaml`. The cache is only a speed-up: if Redis is down the
+    failure is logged and startup goes on, and the entries expire after
+    `ROLE_CACHE_TTL_SECONDS`.
+    """
+    async with sessionmaker() as session:
+        await ensure_default_roles(session)
+        await session.commit()
+
+    try:
+        await invalidate_role_caches(_load_role_definitions())
+    except RedisError:
+        log.warning("role_cache_invalidation_at_startup_failed", exc_info=True)
+
+
+def is_unique_violation(exc: IntegrityError) -> bool:
+    """True when `exc` is a unique-constraint violation (SQLSTATE 23505),
+    false for other integrity errors such as a missing foreign-key row."""
+    orig = exc.orig
+    cause = orig.__cause__ if orig is not None else None
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(cause, "sqlstate", None)
+    return sqlstate == "23505"
+
+
 async def assign_role(session: AsyncSession, user: User, role: Role) -> None:
-    session.add(UserRole(user_id=user.id, role_id=role.id))
-    await session.flush()
+    """Give `user` `role`. Does nothing when they already hold it, including
+    when another request added the same row first: the insert runs in a
+    savepoint, so the conflict does not abort the caller's transaction."""
+    try:
+        async with session.begin_nested():
+            session.add(UserRole(user_id=user.id, role_id=role.id))
+            await session.flush()
+    except IntegrityError as exc:
+        if not is_unique_violation(exc):
+            raise

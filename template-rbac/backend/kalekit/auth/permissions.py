@@ -146,6 +146,17 @@ async def invalidate_role_cache(role_name: str) -> None:
     await r.delete(f"role:{role_name}:permissions")
 
 
+async def invalidate_role_caches(role_names: Iterable[str]) -> None:
+    """Drop the cached permissions of several roles with one DEL. Raises a
+    RedisError when Redis is unreachable; callers that must not fail on
+    that catch it."""
+    keys = [_role_cache_key(name) for name in role_names]
+    if not keys:
+        return
+    r = await get_redis()
+    await r.delete(*keys)
+
+
 # ---------------------------------------------------------------------------
 # Scope resolution: roles → validated Scope enum values
 # ---------------------------------------------------------------------------

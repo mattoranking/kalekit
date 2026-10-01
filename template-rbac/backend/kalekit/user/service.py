@@ -2,10 +2,11 @@ import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from kalekit.auth.repository import bump_token_version
-from kalekit.auth.seed import ADMIN_ROLE
+from kalekit.auth.seed import ADMIN_ROLE, is_unique_violation
 from kalekit.models.role import Role, UserRole
 from kalekit.models.user import User
 from kalekit.user.repository import get_roles_by_name, get_user_by_id
@@ -61,28 +62,37 @@ async def replace_user_roles(
     session: AsyncSession, user: User, new_roles: list[Role]
 ) -> bool:
     """Make `user` hold exactly `new_roles`. Returns True when the set
-    changed, False when it was already that set (nothing is written)."""
+    changed, False when it was already that set (nothing is written).
+
+    An insert that hits the unique (user, role) constraint means another
+    request added the row first. It is skipped (each insert runs in its own
+    savepoint) and does not count as a change made here."""
     wanted = {role.id for role in new_roles}
     current: dict[uuid.UUID, UserRole] = {}
-    duplicates: list[UserRole] = []
+    changed = False
     for user_role in user.roles:
-        if user_role.role_id in current:
-            # user_roles has no unique (user, role) constraint, so an
-            # earlier race may have left a second row. Drop it.
-            duplicates.append(user_role)
+        if user_role.role_id not in wanted:
+            # Every row of an unwanted role, duplicates included.
+            await session.delete(user_role)
+            changed = True
+        elif user_role.role_id in current:
+            # A database created before the unique (user, role) constraint
+            # (no migrations add it) may hold a second row. Drop it.
+            await session.delete(user_role)
         else:
             current[user_role.role_id] = user_role
-    changed = wanted != set(current)
-    for user_role in duplicates:
-        await session.delete(user_role)
-    for role_id, user_role in current.items():
-        if role_id not in wanted:
-            await session.delete(user_role)
     for role_id in wanted - set(current):
-        session.add(UserRole(user_id=user.id, role_id=role_id))
-    if changed or duplicates:
-        await session.flush()
-        await session.refresh(user, ["roles"])
+        try:
+            async with session.begin_nested():
+                session.add(UserRole(user_id=user.id, role_id=role_id))
+                await session.flush()
+            changed = True
+        except IntegrityError as exc:
+            if not is_unique_violation(exc):
+                raise
+    await session.flush()
+    # Re-read always: a skipped insert leaves a row `user.roles` lacks.
+    await session.refresh(user, ["roles"])
     return changed
 
 
@@ -98,10 +108,9 @@ async def change_user_roles(
     name) or 409 (removing the caller's own admin role, or the last active
     admin's). Bumps the token version when the set changed, so the user's
     old tokens, which carry the old `scopes`, stop working."""
-    # One role change at a time: two identical requests (a double click)
-    # would otherwise both insert the same user_roles rows, since nothing
-    # in that table stops a duplicate, and the admin checks below need to
-    # see the previous change's result.
+    # One role change at a time: the admin checks below need to see the
+    # previous change's result. (A double click's second insert would hit
+    # the unique (user, role) constraint, which replace_user_roles skips.)
     await lock_admin_changes(session)
 
     user = await get_user_by_id(session, user_id)
