@@ -334,9 +334,8 @@ def is_unique_violation(exc: IntegrityError) -> bool:
     """True when `exc` is a unique-constraint violation (SQLSTATE 23505),
     false for other integrity errors such as a missing foreign-key row."""
     orig = exc.orig
-    sqlstate = getattr(orig, "sqlstate", None) or getattr(
-        orig.__cause__, "sqlstate", None
-    )
+    cause = orig.__cause__ if orig is not None else None
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(cause, "sqlstate", None)
     return sqlstate == "23505"
 
 
